@@ -1,0 +1,825 @@
+---
+title: "Mueller et al Projection"
+subtitle: "Standard, Max GDP Restriction and Do-no-worse Restriction using Log Interactions"
+author: "Moritz Schwarz and Felix Pretis"
+version: "2 June 2020"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+```{r,purl = FALSE}
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 10)
+```
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+library(MASS)
+
+library(extrafont)
+library(RColorBrewer)
+library(Cairo)
+library(viridis)
+
+
+rm(list = ls())
+select <- dplyr::select
+```
+
+# Load Mueller at el data
+```{r}
+mueller <- readxl::read_excel(here("data","raw","Predictive_ Distributions_by_Country.xlsx"),
+                              skip = 6,col_names = c("iso","empty1","value_2017","empty2","fifty_mean","fifty_0.05",
+                                                     "fifty_0.16","fifty_0.5","fifty_0.84","fifty_0.95", "empty3","hundred_mean","hundred_0.05",
+                                                     "hundred_0.16","hundred_0.5","hundred_0.84","hundred_0.95", "empty4","unknown")) %>% select(-contains("empty"))
+
+mueller_mean <- mueller %>% 
+  select(iso, value_2017, contains("mean"))
+
+mueller_mean %>% 
+  mutate(year = 2017,
+         gdp_cap = exp(value_2017),
+         gdp_cap_fifty = gdp_cap,
+         gdp_cap_fifty_climate = gdp_cap_fifty,
+         gdp_cap_hundred = gdp_cap,
+         gdp_cap_hundred_climate = gdp_cap_hundred,
+         fifty_mean = (fifty_mean/100)+1,
+         hundred_mean = (hundred_mean/100)+1,
+         value_2017 = NULL,
+         gdp_cap = NULL) %>% 
+  select(iso,year,gdp_cap_fifty, gdp_cap_hundred,everything()) -> mueller_df
+```
+
+## Prepare the Max GDP Restriction
+Here we identify the 2017 Level of GDP that will act as our restriction.
+```{r}
+base_gdp <- mueller_df %>% filter(year==2017) %>% 
+  select(iso,gdp_cap_fifty,gdp_cap_hundred) %>% 
+  rename(base_fifty = gdp_cap_fifty,
+         base_hundred = gdp_cap_hundred)
+
+restrict_max_gdp_int = TRUE
+```
+
+```{r}
+coefsamples <- 1
+```
+
+
+# GETS
+## Load coefficients
+```{r}
+load(here("data","temp","standard_gets_model.RData"))
+####simulate coefficients, draw them form joint normal distribution
+set.seed(123)
+selection_coefs_standard <- MASS::mvrnorm(n = coefsamples, mu = standard_model %>% coef(), Sigma = standard_model %>% vcov()) %>%
+  {if (is.vector(.)) t(.) else .} %>%
+  data.frame() %>%
+  rename_all(~ tolower(.)) %>%
+  select(-l1.diff.ln_gdp_cap, -starts_with(c("year", "iis", "time", "iso"))) %>%
+  rename_all(~ paste0(., "_coef"))
+
+# If we are just using one coefsample, we simply use the mean estimate from the model
+if(coefsamples==1){
+  standard_model %>%
+    coef %>%
+    data.frame(variable = names(.),
+               coefficient = .,
+               row.names = NULL) %>%
+    pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+    rename_all(~tolower(.)) %>%
+    select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+    rename_all(~paste0(.,"_coef")) -> selection_coefs_standard
+}
+```
+
+
+```{r, eval= FALSE, purl = FALSE}
+# Set eval=TRUE to get a simple plot of the mean coefficient and the draws that were taken
+selection_coefs_standard %>% 
+  pivot_longer(cols = everything()) %>% 
+  ggplot(aes(x=value)) + 
+  geom_histogram() + 
+  facet_wrap(~name,scales = "free") + 
+  geom_vline(data = standard_model %>%
+               coef %>%
+               data.frame(variable = names(.),
+                          coefficient = .,
+                          row.names = NULL) %>%
+               pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+               rename_all(~tolower(.)) %>%
+               select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+               rename_all(~paste0(.,"_coef")) %>% pivot_longer(cols = everything()),aes(xintercept=value))
+
+```
+
+
+## Collect Relevant Information
+
+```{r}
+selection_coefs_standard %>% 
+  names %>% 
+  gsub("_coef","",.) %>% 
+  unique -> climate_vars
+
+selection_coefs_standard %>% 
+  names %>% 
+  gsub("_coef|_2","",.) %>% 
+  unique -> climate_vars_lin
+
+selection_coefs_standard %>% 
+  names %>% 
+  grep("_2",.,value = TRUE) %>% 
+  gsub("_coef|_2","",.) %>% 
+  unique -> climate_vars_sq
+
+# selection_coefs_interaction_all %>% 
+#   names %>% 
+#   gsub("_coef","",.) %>% 
+#   grep("_int",.,value = TRUE) %>% 
+#   gsub("_int","",.) %>% 
+#   unique -> interaction_vars_all
+# 
+# selection_coefs_interaction_selected %>%
+#   names %>%
+#   gsub("_coef","",.) %>%
+#   grep("_int",.,value = TRUE) %>%
+#   gsub("_int","",.) %>%
+#   unique -> interaction_vars_selected
+
+```
+
+## Load climate data
+```{r}
+climate <- vroom(here("data","temp","corrected_anomaly_climatedata.csv"))
+climate %>% 
+  select(model,rcp,ensemble,final_temp,iso,year,all_of(climate_vars_lin),
+         all_of(paste0(climate_vars_sq,"_2"))) %>% 
+  drop_na -> climate_subset
+#mutate(across(.cols = climate_vars_sq,.fns = list(`2` = ~.^2))) -> climate_subset
+rm(climate)
+```
+
+
+## Project (Server)
+```{r}
+v=1
+# Calculate the climate effect
+effect_standard <- climate_subset
+for(var in climate_vars){
+  #print(var)
+  climate_subset %>% 
+    select(all_of(var)) %>% 
+    pull %>% "*"(selection_coefs_standard %>% 
+                   slice(v) %>% 
+                   select(all_of(paste0(var,"_coef"))) %>% 
+                   pull) %>%
+    as_tibble %>% 
+    rename_all(~paste0(var,"_effect"))  %>% 
+    bind_cols(effect_standard,.) -> effect_standard
+}
+
+done <- mueller_df %>% 
+  select(-contains("fifty")) %>% 
+  filter(year==2017) %>% 
+  left_join(effect_standard %>% 
+              filter(year == 2017) %>% 
+              select(-model,-ensemble,-rcp),by = c("iso","year")) %>% 
+  mutate(realisation = v) %>% 
+  relocate(c(realisation,final_temp), .after = year)
+
+for(i in 2018:2099){
+  print(paste0("Realisation ",v," Year: ",i))
+  done %>% 
+    filter(year == i-1) %>% 
+    select(iso, year, realisation, final_temp,contains("hundred")) %>% 
+    # this step: 
+    left_join(effect_standard %>% 
+                filter(year == i-1) %>% 
+                mutate(realisation = v) %>% 
+                select(-model,-ensemble,-rcp),by = c("iso","year","final_temp","realisation")) %>% 
+    mutate(total_climate_effect = rowSums(select(., ends_with("effect")))) %>% 
+    mutate(#gdp_cap_fifty = gdp_cap_fifty*fifty_mean,
+      gdp_cap_hundred = gdp_cap_hundred*hundred_mean,
+      #gdp_cap_fifty_climate = gdp_cap_fifty_climate*(fifty_mean + total_climate_effect),
+      gdp_cap_hundred_climate = gdp_cap_hundred_climate*(hundred_mean + total_climate_effect),
+      year = i) %>% 
+    bind_rows(done,.) -> done
+  
+}
+
+done_standard <- done
+
+```
+
+
+# Adaptation GETS
+
+## Load Coefficients
+
+### Standard (for restriction)
+```{r, purl=FALSE}
+load(here("data","temp","standard_gets_model.RData"))
+####simulate coefficients, draw them form joint normal distribution
+set.seed(123)
+selection_coefs_standard <- MASS::mvrnorm(n = coefsamples, mu = standard_model %>% coef(), Sigma = standard_model %>% vcov()) %>%
+  {if (is.vector(.)) t(.) else .} %>%
+  data.frame() %>%
+  rename_all(~ tolower(.)) %>%
+  select(-l1.diff.ln_gdp_cap, -starts_with(c("year", "iis", "time", "iso"))) %>%
+  rename_all(~ paste0(., "_coef"))
+
+# If we are just using one coefsample, we simply use the mean estimate from the model
+if(coefsamples==1){
+  standard_model %>%
+    coef %>%
+    data.frame(variable = names(.),
+               coefficient = .,
+               row.names = NULL) %>%
+    pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+    rename_all(~tolower(.)) %>%
+    select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+    rename_all(~paste0(.,"_coef")) -> selection_coefs_standard
+}
+```
+
+
+### Log Interaction All
+```{r, purl=FALSE}
+load(here("data","temp","log_interaction_model_all.RData"))
+
+####simulate coefficients, draw them form joint normal distribution
+set.seed(123)
+selection_coefs_interaction_all_log <- MASS::mvrnorm(n = coefsamples, mu = interaction_model_all_log %>% coef(), Sigma = interaction_model_all_log %>% vcov()) %>%
+  {if (is.vector(.)) t(.) else .} %>%
+  data.frame() %>%
+  rename_all(~ tolower(.)) %>%
+  select(-l1.diff.ln_gdp_cap, -starts_with(c("year", "iis", "time", "iso"))) %>%
+  rename_all(~ paste0(., "_coef"))
+
+if(coefsamples==1){
+  interaction_model_all_log %>%
+    coef %>%
+    data.frame(variable = names(.),
+               coefficient = .,
+               row.names = NULL) %>%
+    pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+    rename_all(~tolower(.)) %>%
+    select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+    rename_all(~paste0(.,"_coef")) -> selection_coefs_interaction_all_log
+}
+```
+
+
+### Log Interaction Selected
+```{r, purl=FALSE}
+load(here("data","temp","log_interaction_model_selected.RData"))
+
+####simulate coefficients, draw them form joint normal distribution
+set.seed(123)
+selection_coefs_interaction_selected_log <- MASS::mvrnorm(n = coefsamples, mu = interaction_model_selected_log %>% coef(), Sigma = interaction_model_selected_log %>% vcov()) %>%
+  {if (is.vector(.)) t(.) else .} %>%
+  data.frame() %>%
+  rename_all(~ tolower(.)) %>%
+  select(-l1.diff.ln_gdp_cap, -starts_with(c("year", "iis", "time", "iso"))) %>%
+  rename_all(~ paste0(., "_coef"))
+
+if(coefsamples==1){
+  interaction_model_selected_log %>%
+    coef %>%
+    data.frame(variable = names(.),
+               coefficient = .,
+               row.names = NULL) %>%
+    pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+    rename_all(~tolower(.)) %>%
+    select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+    rename_all(~paste0(.,"_coef")) -> selection_coefs_interaction_selected_log
+}
+```
+
+
+## Collect Relevant Information
+
+```{r, purl=FALSE}
+selection_coefs_standard %>% 
+  names %>% 
+  gsub("_coef","",.) %>% 
+  unique -> climate_vars
+
+selection_coefs_standard %>% 
+  names %>% 
+  gsub("_coef|_2","",.) %>% 
+  unique -> climate_vars_lin
+
+selection_coefs_standard %>% 
+  names %>% 
+  grep("_2",.,value = TRUE) %>% 
+  gsub("_coef|_2","",.) %>% 
+  unique -> climate_vars_sq
+
+selection_coefs_interaction_all_log %>% 
+  names %>% 
+  gsub("_coef","",.) %>% 
+  grep("_int",.,value = TRUE) %>% 
+  gsub("_int","",.) %>% 
+  unique -> interaction_vars_all
+
+selection_coefs_interaction_selected_log %>%
+  names %>%
+  gsub("_coef","",.) %>%
+  grep("_int",.,value = TRUE) %>%
+  gsub("_int","",.) %>%
+  unique -> interaction_vars_selected
+```
+
+## Load climate data
+```{r, purl=FALSE}
+climate <- vroom(here("data","temp","corrected_anomaly_climatedata.csv"))
+climate %>% 
+  select(model,rcp,ensemble,final_temp,iso,year,all_of(climate_vars_lin),
+         all_of(paste0(climate_vars_sq,"_2"))) %>% 
+  drop_na -> climate_subset
+#mutate(across(.cols = climate_vars_sq,.fns = list(`2` = ~.^2))) -> climate_subset
+rm(climate)
+```
+# Alternative Restriction 1: Baseline Restriction and Max GDP
+
+Idea: Because we are only attenuating the effect of climate change, when the standard effect would suggest that GDP decreases, the Adaptation equivalent can only increase by a maximum of the baseline. 
+
+Option 1: if country would lose, best could do is baseline. 
+Combined: can do no worse than the no-adaptation baseline, but if the signs don't agree can't do better than baseline growth
+
+
+```{r}
+base_gdp_2017 <- mueller_df %>% select(iso,gdp_cap_hundred) %>% rename(base_value_2017 = gdp_cap_hundred)
+max_overall_gdp <- max(base_gdp$base_fifty)
+```
+
+## Project (Server)
+```{r, purl=FALSE}
+v=1
+
+effect_interaction_selected_log <- climate_subset
+# Calculate the climate effect
+for(var in climate_vars){
+  #print(var)
+  climate_subset %>% 
+    select(all_of(var)) %>% 
+    pull %>% "*"(selection_coefs_interaction_selected_log %>% 
+                   slice(v) %>% 
+                   select(all_of(paste0(var,"_coef"))) %>% 
+                   pull) %>%
+    as_tibble %>% 
+    rename_all(~paste0(var,"_effect"))  %>% 
+    bind_cols(effect_interaction_selected_log,.) -> effect_interaction_selected_log
+}
+
+for(var in interaction_vars_selected){
+  effect_interaction_selected_log %>% 
+    select(all_of(var)) %>% 
+    pull %>% "*"(selection_coefs_interaction_selected_log %>% 
+                   slice(v) %>% 
+                   select(all_of(paste0(var,"_int_coef"))) %>% 
+                   pull) %>%
+    as_tibble %>% 
+    rename_all(~paste0(var,"_int_effect"))  %>% 
+    bind_cols(effect_interaction_selected_log,.) -> effect_interaction_selected_log
+}
+
+# Calculate the standard climate effect
+effect_standard <- climate_subset
+for(var in climate_vars){
+  #print(var)
+  climate_subset %>% 
+    select(all_of(var)) %>% 
+    pull %>% "*"(selection_coefs_standard %>% 
+                   slice(v) %>% 
+                   select(all_of(paste0(var,"_coef"))) %>% 
+                   pull) %>%
+    as_tibble %>% 
+    rename_all(~paste0(var,"_effect"))  %>% 
+    bind_cols(effect_standard,.) -> effect_standard
+}
+
+effect_standard %>% 
+  rename_with(.cols = contains("effect"),.fn = ~gsub("effect","stdeffect",.)) -> effect_std
+
+effect_interaction_selected_log %>% 
+  rename_with(.cols = contains("effect"),.fn = ~gsub("effect","logeffect",.)) %>% 
+  bind_cols(effect_std %>% select(contains("stdeffect"))) -> effect_int
+
+done <- mueller_df %>% 
+  select(-contains("fifty")) %>% 
+  filter(year==2017) %>% 
+  left_join(effect_int %>% 
+              filter(year == 2017) %>% 
+              select(-model,-ensemble),by = c("iso","year")) %>% 
+  
+  #drop_na %>% 
+  mutate(realisation = v) %>% 
+  relocate(c(realisation,final_temp), .after = year)
+
+for(i in 2018:2099){
+  print(paste0("Realisation ",v," Year: ",i))
+  #i=2018
+  
+  done %>% 
+    filter(year == i-1) %>% 
+    select(iso, year, final_temp, realisation, contains(c("hundred")),-contains("base")) %>% 
+    left_join(effect_int %>% 
+                filter(year == i-1) %>% 
+                mutate(realisation = v) %>% 
+                select(-model,-ensemble,-rcp),by = c("iso","year","final_temp","realisation")) %>% 
+    
+    mutate(#gdp_cap_fifty = gdp_cap_fifty*fifty_mean,
+      gdp_cap_hundred = gdp_cap_hundred*hundred_mean) %>% 
+    
+    mutate(total_stdeffect = rowSums(select(.,contains("stdeffect"))),
+           
+           total_climlogeffect = rowSums(select(.,contains("logeffect"),-contains("_int_"))),
+           total_inteffect =  rowSums(select(.,contains("_int_logeffect")))) %>% 
+    
+    # max GDP Restriction
+    mutate(interaction_effect_hundred = total_climlogeffect + total_inteffect*log( 
+      
+      ifelse(gdp_cap_hundred_climate>max_overall_gdp,
+             max_overall_gdp,
+             gdp_cap_hundred_climate))) %>%
+    
+    
+    mutate(total_effect_this_year_hundred = ifelse(total_stdeffect > interaction_effect_hundred,
+                                                   total_stdeffect,
+                                                   interaction_effect_hundred))   %>% 
+    
+    
+    # in words: if there is a sign difference, take take the smaller of the interaction or the base effect
+    mutate(gdp_cap_hundred_climate = gdp_cap_hundred_climate* 
+             ifelse(
+               test = sign(total_stdeffect)==-1 & sign(interaction_effect_hundred)==1, # if sign between stdeffect != interaction 
+               yes = ifelse(hundred_mean<(total_effect_this_year_hundred+1),hundred_mean,(total_effect_this_year_hundred+1)),
+               no = hundred_mean + total_effect_this_year_hundred
+             )
+    ) %>% 
+    
+    mutate(year = i) %>% 
+    
+    bind_rows(done,.) -> done
+  
+}
+
+
+done_adaptation <- done 
+
+```
+
+
+# Create Plot
+## Standard
+```{r}
+set_null_device("png")
+countries <- c("USA","IND","CHN","RUS")
+
+done_standard %>% 
+  select(iso,year,final_temp,contains("gdp_cap")) %>% 
+  mutate(diff_hundred = (gdp_cap_hundred_climate - gdp_cap_hundred)/gdp_cap_hundred) %>% 
+  
+  pivot_longer(cols = contains(c("diff","gdp_cap")),names_to = "variable",values_to = "value") %>% 
+  
+  filter(variable == "diff_hundred",iso %in% countries) %>% 
+  
+  ggplot(aes(x=year,y=value,color=final_temp, group=final_temp)) +
+  coord_cartesian(ylim = c(-1,2))+
+  geom_line() + 
+  geom_hline(aes(yintercept = 0),linetype=2)+
+  geom_hline(aes(yintercept = -1))+
+  
+  facet_wrap(~iso,nrow=1,labeller = labeller(iso = c("CHN"="China","IND" = "India","RUS" = "Russia","USA" = "United States"))) + 
+  
+  scale_color_viridis_c(name="Temperature Anomaly",labels = function(x){paste0(x,"°C")},
+                        guide = guide_colorbar(title.position = "top")) +
+  scale_y_continuous(labels = scales::percent)+
+  scale_x_continuous(breaks = c(2025,2050,2075,2100))+
+  
+  labs(y="Impact to baseline",x=NULL)+
+  #title = "Standard Model Projections",subtitle = "gets Model used.")+
+  
+  theme_minimal() + 
+  theme(legend.position = "bottom",
+        panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+        text = element_text(family = "Georgia",size = 10)) -> A
+
+
+done_standard %>% 
+  select(iso,year,final_temp,contains("gdp_cap")) %>%
+  left_join(mueller_df %>% select(iso,gdp_cap_hundred) %>% rename(base_value_2017 = gdp_cap_hundred),by="iso") %>% 
+  
+  mutate(diff = (gdp_cap_hundred_climate - base_value_2017)/base_value_2017) %>% 
+  
+  pivot_longer(cols = contains(c("diff")),names_to = "variable",values_to = "value") %>% 
+  
+  filter(iso %in% countries) %>% 
+  
+  
+  ggplot(data = ,aes(x=year,y=value,color=final_temp, group=final_temp)) +
+  coord_cartesian(ylim = c(-1,4))+
+  geom_line() + 
+  geom_hline(aes(yintercept = 0),linetype=2)+
+  geom_hline(aes(yintercept = -1))+
+  
+  facet_wrap(~iso,nrow=1) + 
+  
+  scale_color_viridis_c(name="Temperature Anomaly",labels = function(x){paste0(x,"°C")},
+                        guide = guide_colorbar(title.position = "top")) +
+  scale_y_continuous(labels = scales::percent)+
+  scale_x_continuous(breaks = c(2025,2050,2075,2100))+
+  labs(y="Impact to 2017 Value (MSW)",x=NULL)+#,
+  #title = "Standard Model Projections",subtitle = "gets Model used.")+
+  
+  theme_minimal() + 
+  theme(legend.position = "bottom",
+        panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+        text = element_text(family = "Georgia",size = 10)) -> B
+
+
+leg <- get_legend(A + theme(legend.box.margin = margin(0, b = 10, 0, 0),
+                            legend.key.size = unit(0.25, "cm"),
+                            legend.key.width = unit(1.5,"cm")))
+
+combined <- plot_grid(A + theme(legend.position = "none"),
+                      B + theme(legend.position = "none",
+                                strip.text = element_blank()),
+                      leg,
+                      nrow=3,rel_heights = c(1,1,0.2))
+
+ggsave(plot = combined,filename = here("output","figures","TimeSeries_gets.jpg"),width = 6,height = 6,dpi = 300)
+```
+
+## Adaptation
+```{r}
+set_null_device("png")
+countries <- c("USA","IND","CHN","RUS")
+
+done_adaptation %>% 
+  select(iso,year,final_temp,contains("gdp_cap")) %>% 
+  mutate(diff_hundred = (gdp_cap_hundred_climate - gdp_cap_hundred)/gdp_cap_hundred) %>% 
+  
+  pivot_longer(cols = contains(c("diff","gdp_cap")),names_to = "variable",values_to = "value") %>% 
+  
+  filter(variable == "diff_hundred",iso %in% countries) %>% 
+  
+  ggplot(aes(x=year,y=value,color=final_temp, group=final_temp)) +
+  coord_cartesian(ylim = c(-1,2))+
+  geom_line() + 
+  geom_hline(aes(yintercept = 0),linetype=2)+
+  geom_hline(aes(yintercept = -1))+
+  
+  facet_wrap(~iso,nrow=1,labeller = labeller(iso = c("CHN"="China","IND" = "India","RUS" = "Russia","USA" = "United States"))) + 
+  
+  scale_color_viridis_c(name="Temperature Anomaly",labels = function(x){paste0(x,"°C")},
+                        guide = guide_colorbar(title.position = "top")) +
+  scale_y_continuous(labels = scales::percent)+
+  scale_x_continuous(breaks = c(2025,2050,2075,2100))+
+  
+  labs(y="Impact to baseline",x=NULL)+
+  #title = "Standard Model Projections",subtitle = "gets Model used.")+
+  
+  theme_minimal() + 
+  theme(legend.position = "bottom",
+        panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+        text = element_text(family = "Georgia",size = 10)) -> A
+
+
+done_adaptation %>% 
+  select(iso,year,final_temp,contains("gdp_cap")) %>%
+  left_join(mueller_df %>% select(iso,gdp_cap_hundred) %>% rename(base_value_2017 = gdp_cap_hundred),by="iso") %>% 
+  
+  mutate(diff = (gdp_cap_hundred_climate - base_value_2017)/base_value_2017) %>% 
+  
+  pivot_longer(cols = contains(c("diff")),names_to = "variable",values_to = "value") %>% 
+  
+  filter(iso %in% countries) %>% 
+  
+  
+  ggplot(data = ,aes(x=year,y=value,color=final_temp, group=final_temp)) +
+  coord_cartesian(ylim = c(-1,4))+
+  geom_line() + 
+  geom_hline(aes(yintercept = 0),linetype=2)+
+  geom_hline(aes(yintercept = -1))+
+  
+  facet_wrap(~iso,nrow=1) + 
+  
+  scale_color_viridis_c(name="Temperature Anomaly",labels = function(x){paste0(x,"°C")},
+                        guide = guide_colorbar(title.position = "top")) +
+  scale_y_continuous(labels = scales::percent)+
+  scale_x_continuous(breaks = c(2025,2050,2075,2100))+
+  labs(y="Impact to 2017 Value (MSW)",x=NULL)+#,
+  #title = "Standard Model Projections",subtitle = "gets Model used.")+
+  
+  theme_minimal() + 
+  theme(legend.position = "bottom",
+        panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+        text = element_text(family = "Georgia",size = 10)) -> B
+
+
+leg <- get_legend(A + theme(legend.box.margin = margin(0, b = 10, 0, 0),
+                            legend.key.size = unit(0.25, "cm"),
+                            legend.key.width = unit(1.5,"cm")))
+
+combined <- plot_grid(A + theme(legend.position = "none"),
+                      B + theme(legend.position = "none",
+                                strip.text = element_blank()),
+                      leg,
+                      nrow=3,rel_heights = c(1,1,0.2))
+
+ggsave(plot = combined,filename = here("output","figures","TimeSeries_gets_Adaptation.jpg"),width = 6,height = 6,dpi = 300)
+```
+
+
+<!-- ```{r} -->
+<!-- scale_color_viridis_c("Temp Anomaly")+ -->
+<!--   scale_y_continuous(labels = scales::percent) + -->
+<!--   labs(y = "Value as % of Mueller at al Baseline",x="") +  -->
+<!--   theme(panel.grid.major = element_line(color="grey",size=0.1), -->
+<!--         panel.background = element_blank(), -->
+<!--         text = element_text(family = "Georgia",size = 15)) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- done %>%  -->
+<!--   select(iso,year,final_temp,contains("gdp_cap")) %>% -->
+<!--   left_join(mueller_df %>% select(iso,gdp_cap_hundred) %>% rename(base_value_2017 = gdp_cap_hundred),by="iso") %>%  -->
+
+<!--   mutate(diff = (gdp_cap_hundred_climate - base_value_2017)/base_value_2017) %>%  -->
+
+<!--   pivot_longer(cols = contains(c("diff")),names_to = "variable",values_to = "value") %>%  -->
+
+<!--   filter(iso %in% countries) %>%  -->
+
+
+<!--   ggplot(data = ,aes(x=year,y=value,color=final_temp, group=final_temp)) + -->
+
+<!--   geom_line() +  -->
+<!--   geom_hline(aes(yintercept = 0),linetype=2)+ -->
+<!--   geom_hline(aes(yintercept = -1))+ -->
+
+<!--   facet_wrap(~iso, scales = "free") +  -->
+
+<!--   scale_color_viridis_c(name="Temperature Anomlay") + -->
+<!--   scale_y_continuous(labels = scales::percent)+ -->
+<!--   labs(y="GDP per capita impact to 2017 Value (MSW)", -->
+<!--        title = "Standard Model Projections",subtitle = "gets Model used.")+ -->
+
+<!--   theme_minimal() +  -->
+<!--   theme(legend.position = "bottom", -->
+<!--         panel.border = element_rect(colour = "black",size=0.5,fill=NA), -->
+<!--         text = element_text(family = "Georgia",size = 10)) -->
+
+<!-- scale_color_viridis_c("Temp Anomaly")+ -->
+<!--   scale_y_continuous(labels = scales::percent)+ -->
+
+<!--   labs(y = "Value as % of 2017 Value",x="") +  -->
+
+<!--   theme(panel.grid.major = element_line(color="grey",size=0.1), -->
+<!--         panel.background = element_blank(), -->
+<!--         text = element_text(family = "Georgia",size = 15)) -->
+<!-- ``` -->
+
+
+<!-- # Function Definition -->
+<!-- ```{r, eval= FALSE, purl = FALSE} -->
+<!-- baseline_graph <- function(data, subtitle = ""){ -->
+<!--   data %>%  -->
+<!--     select(iso,year,final_temp,contains("gdp_cap")) %>%  -->
+<!--     mutate(diff_fifty = (gdp_cap_fifty_climate - gdp_cap_fifty)/gdp_cap_fifty, -->
+<!--            diff_hundred = (gdp_cap_hundred_climate - gdp_cap_hundred)/gdp_cap_hundred) %>%  -->
+
+<!--     pivot_longer(cols = contains(c("diff","gdp_cap")),names_to = "variable",values_to = "value") %>%  -->
+
+<!--     filter(variable == "diff_hundred",iso %in% c("USA","IND","CHN","BGD","RUS", "BRA")) %>%  -->
+
+<!--     drop_na %>%  -->
+
+<!--     mutate(value = ifelse(value>10e20,10e20,value)) -> intermed -->
+
+<!--   ggplot(data = intermed,aes(x=year,y=value,color=final_temp, group=final_temp)) + -->
+<!--     geom_line() +  -->
+<!--     geom_hline(aes(yintercept = 0),linetype=2)+ -->
+<!--     geom_hline(aes(yintercept = -1))+ -->
+<!--     facet_wrap(~iso, scales = "free") +  -->
+<!--     scale_color_viridis_c("Temp Anomaly")+ -->
+<!--     scale_y_continuous(labels = ifelse(max(intermed$value)>1000,scales::scientific,scales::percent)) + -->
+<!--     labs(title = "Change to Baseline", subtitle = subtitle, -->
+<!--          y = "Value as % of Mueller at al Baseline",x="") +  -->
+<!--     theme(panel.grid.major = element_line(color="grey",size=0.1), -->
+<!--           panel.background = element_blank(), -->
+<!--           text = element_text(family = "Georgia",size = 15)) -->
+<!-- } -->
+
+<!-- base_gdp_2017 <- mueller_df %>% select(iso,gdp_cap_fifty) %>% rename(base_value_2017 = gdp_cap_fifty) -->
+<!-- basevalue_graph <- function(data, subtitle = ""){ -->
+<!--   data %>%  -->
+<!--     select(iso,year,final_temp,contains("gdp_cap")) %>% -->
+<!--     left_join(base_gdp_2017,by="iso") %>%  -->
+
+<!--     mutate(diff_fifty = (gdp_cap_fifty_climate - base_value_2017)/base_value_2017, -->
+<!--            diff_hundred = (gdp_cap_hundred_climate - base_value_2017)/base_value_2017) %>%  -->
+
+<!--     pivot_longer(cols = contains(c("diff","gdp_cap")),names_to = "variable",values_to = "value") %>%  -->
+
+<!--     filter(variable == "diff_fifty",iso %in% c("USA","IND","CHN","BGD","RUS", "BRA")) %>%  -->
+
+<!--     drop_na %>%  -->
+
+<!--     mutate(value = ifelse(value>10e20,10e20,value)) -> intermed -->
+
+<!--   # Plot -->
+<!--   ggplot(data = intermed,aes(x=year,y=value,color=final_temp, group=final_temp)) + -->
+
+<!--     geom_line() +  -->
+<!--     geom_hline(aes(yintercept = 0),linetype=2)+ -->
+<!--     geom_hline(aes(yintercept = -1))+ -->
+
+<!--     facet_wrap(~iso, scales = "free") +  -->
+
+<!--     scale_color_viridis_c("Temp Anomaly")+ -->
+<!--     scale_y_continuous(labels = ifelse(max(intermed$value)>1000,scales::scientific,scales::percent))+ -->
+
+<!--     labs(title = "Change to 2017 Value", y = "Value as % of 2017 Value",x="",subtitle = subtitle) +  -->
+
+<!--     theme(panel.grid.major = element_line(color="grey",size=0.1), -->
+<!--           panel.background = element_blank(), -->
+<!--           text = element_text(family = "Georgia",size = 15)) -->
+<!-- } -->
+
+<!-- damage_function_graph <- function(data,  -->
+<!--                                   time_period_start = 2095,  -->
+<!--                                   time_period_end = 2099,  -->
+<!--                                   confidence_degree = 2,  -->
+<!--                                   uncertainty_low = 0.05,  -->
+<!--                                   uncertainty_high = 0.95,  -->
+<!--                                   slope.val = 1.5){ -->
+
+
+<!--   mean_slope <- (slope.val/1000) #1000 to make it K/1000 GtC and 3.667 to convert C to CO2 - aka /3667. Conversion rate is from https://www.ipcc.ch/pdf/special-reports/srccs/srccs_annex1.pdf Table AI.6 IPCC Special Report on Carbon dioxide Capture and Storage -->
+
+
+<!--   data %>%  -->
+<!--     select(iso,year,final_temp,contains("gdp_cap")) %>%  -->
+<!--     mutate(diff_fifty = (gdp_cap_fifty_climate - gdp_cap_fifty)/gdp_cap_fifty, -->
+<!--            diff_hundred = (gdp_cap_hundred_climate - gdp_cap_hundred)/gdp_cap_hundred) %>%  -->
+
+<!--     pivot_longer(cols = contains(c("diff","gdp_cap")),names_to = "variable",values_to = "value") %>%  -->
+
+<!--     filter(variable == "diff_hundred") %>%  #,iso %in% c("USA","IND","CHN","BGD","RUS", "BRA")) %>%  -->
+
+<!--     drop_na %>%  -->
+
+<!--     mutate(value = ifelse(value>10e20,10e20,value)) %>%  -->
+<!--     filter(year %in% c(time_period_start : time_period_end)) %>%  -->
+<!--     group_by(iso,final_temp) %>%  -->
+<!--     summarise(value = mean(value)) -> intermed -->
+
+<!--   rq_model_mid <- quantreg::rq(formula = value ~ final_temp + if(confidence_degree==2){final_temp + I(final_temp*final_temp)}else{splines::bs(final_temp,df=confidence_degree)},tau=0.5,method = "pfn",data=intermed) -->
+<!--   rq_model_high <- quantreg::rq(formula = value ~ final_temp + if(confidence_degree==2){final_temp + I(final_temp*final_temp)}else{splines::bs(final_temp,df=confidence_degree)},tau=0.95,method = "pfn",data=intermed) -->
+<!--   rq_model_low <- quantreg::rq(formula = value ~ final_temp + if(confidence_degree==2){final_temp + I(final_temp*final_temp)}else{splines::bs(final_temp,df=confidence_degree)},tau=0.05,method = "pfn",data=intermed) -->
+
+<!--   # Add quantiles to data frame -->
+<!--   intermed[["pc.975"]] <- predict(rq_model_high) -->
+<!--   intermed[["pc.50"]] <- predict(rq_model_mid) -->
+<!--   intermed[["pc.025"]] <- predict(rq_model_low) -->
+<!--   intermed[["mean"]] <- intermed %>% group_by(final_temp) %>% mutate(mean = mean(value)) %>% ungroup %>% pull(mean) -->
+
+<!--   intermed <- intermed[!duplicated(intermed[,"final_temp",]),] -->
+
+
+<!--   ggplot(data = intermed,aes(x=final_temp)) + -->
+<!--     geom_line(aes(y=pc.50)) + -->
+<!--     geom_line(aes(y=mean),linetype = 3) + -->
+<!--     geom_ribbon(aes(ymin=pc.025,ymax = pc.975),fill="blue",alpha=0.2)+ -->
+<!--     geom_hline(aes(yintercept = 0),linetype=2)+ -->
+<!--     geom_hline(aes(yintercept = -1))+ -->
+<!--     #scale_color_viridis_c("Temp Anomaly")+ -->
+
+<!--     scale_y_continuous(labels = ifelse(max(intermed$value)>1000,scales::scientific,scales::percent)) + -->
+<!--     scale_x_continuous(labels = function(x) paste(x,"°C",sep=""),sec.axis = sec_axis(trans= ~./mean_slope,name = "Cumulative Emissions")) +  -->
+
+<!--     labs(title = "Range of Country-Level GDP per capita Impacts", -->
+<!--          subtitle = paste0("End-of-Century Projections (",time_period_start," - ",time_period_end,") of Median GDP per Capita Levels Difference to Baseline Projections.\nThe confidence interval represents ",scales::percent(uncertainty_high - uncertainty_low)," uncertainty range.\nProjections made using ",intermed %>% distinct(final_temp) %>% nrow," CMIP5 ensemble runs and drawing ",coefsamples," coefficient samples from the parameter estimates."),# (except BMA estimates, which were averaged over PIP).", -->
+<!--          x="Global Temperature Anomaly to 1850 - 1900", -->
+<!--          y="Country-Level GDP per capita\nPercentage Difference to Baseline") +  -->
+<!--     theme(panel.grid.major = element_line(color="grey",size=0.1), -->
+<!--           panel.background = element_blank(), -->
+<!--           text = element_text(family = "Georgia",size = 12)) -->
+<!-- } -->
+
+<!-- ``` -->

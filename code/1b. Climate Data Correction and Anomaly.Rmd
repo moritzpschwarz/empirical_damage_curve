@@ -1,0 +1,314 @@
+---
+title: "Climate Growth Projection"
+author: "Moritz Schwarz and Felix Pretis"
+version: "9 June 2020"
+output:
+  html_document:
+    df_print: paged
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+editor_options: 
+  chunk_output_type: inline
+---
+
+**October 2020:**
+This script takes the file climate_variables_total.csv and creates the mean-corrected anomaly corrected_anomaly_climatedata.csv.
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+
+library(extrafont)
+library(RColorBrewer)
+library(Cairo)
+library(viridis)
+
+rm(list = ls())
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 8)
+```
+
+
+```{r}
+maxyear_recur <- 2012
+
+correction <- TRUE
+anomaly <- TRUE
+
+# Sanity Check
+if(anomaly == FALSE & correction == FALSE){
+  stop("Either Correction or Anomaly Creation must be positive - otherwise don't use this script")
+  }
+
+
+country_dataset <- vroom(here("data","use","damage_curve_country_dataset_timetrends_updated02-19.csv"))
+```
+
+
+# Load the climate data
+We remove ```altwsdi``` ```altcwd``` ```altcsdi``` ```altcdd")``` because we don't have historical data for them. 
+
+```{r}
+climate <- vroom(here("data","out","climate_variables_total.csv")) %>% 
+  select(-starts_with("alt")) %>% 
+  filter(year<2101) %>% 
+  mutate(across(.cols = c(-final_temp, -iso, -model, -rcp, -ensemble,-year),.fns = list(`2` = ~.^2)))
+```
+
+
+```{r}
+climate %>% 
+  select(-final_temp, -iso, -model, -rcp, -ensemble,-year) %>% 
+  names -> correction_vars
+```
+
+
+# Correction
+```{r}
+if(correction){
+  climate %>% 
+  filter(year < (maxyear_recur+1)) %>% 
+  group_by(iso,final_temp) %>% 
+  summarise_at(.vars = vars(-model, -rcp, -ensemble,-year),list(~mean(.,na.rm=T))) %>% 
+  ungroup -> future_mean
+
+country_dataset %>% 
+  filter(year>2006 & year<(maxyear_recur+1)) %>%
+  rename_all(tolower) %>% 
+  select(all_of(names(climate %>% select(-model,-rcp,-ensemble,-final_temp,-starts_with("alt"))))) %>% 
+  group_by(iso) %>% 
+  summarise_at(.vars = vars(-year),list(past=~mean(.,na.rm=T))) %>% 
+  ungroup %>% 
+  drop_na -> past_mean
+
+future_mean %>% 
+  left_join(past_mean,by=c("iso")) -> future_and_past
+
+bind_cols(future_mean %>% select(iso, final_temp),
+          future_and_past[, correction_vars] - future_and_past[, paste0(correction_vars, "_past")]) %>% 
+  rename_at(.vars = vars(-final_temp,-iso),.funs = ~paste0(.,"_correction"))-> corrected_values
+
+climate %>% 
+  left_join(corrected_values,by=c("iso","final_temp")) -> to_be_corrected
+
+bind_cols(climate %>% select(-all_of(correction_vars)),
+          to_be_corrected[, correction_vars, with = F] - to_be_corrected[, paste0(correction_vars, "_correction"),
+                                                                         with=F]) -> climate_corrected
+} else {
+  
+  climate -> climate_corrected
+  
+  }
+```
+
+# Anomaly
+```{r}
+if(anomaly){
+  country_dataset %>% 
+    filter(year>1999&year<2012) %>% 
+    select(-year,-contains(c("year_","time","iso_","diff"))) %>% 
+    group_by(iso) %>% 
+    summarise_all(.funs = ~mean(.,na.rm=T)) %>% 
+    rename_all(.funs = ~tolower(.)) %>% 
+    select(iso,all_of(correction_vars)) %>% 
+    rename_at(.vars = vars(everything(),-iso),~paste0(.,"_anomaly")) -> base_scenario_mean
+  
+climate_corrected %>% 
+  left_join(base_scenario_mean,by="iso")-> anomaly_to_be_created
+
+climate_corrected %>% 
+  select(model,rcp,ensemble,final_temp,iso,year) %>% 
+  bind_cols(.,anomaly_to_be_created[,correction_vars, with=F] - anomaly_to_be_created[,paste0(correction_vars,"_anomaly"), with=F]) -> climate_ready
+  
+} else {
+  climate_corrected -> climate_ready
+}
+
+```
+
+
+# Save
+```{r}
+if(correction&anomaly){write_csv(climate_ready, path = here("data","temp","corrected_anomaly_climatedata.csv"))}
+if(!correction&anomaly){write_csv(climate_ready, path = here("data","temp","anomaly_climatedata.csv"))}
+if(correction&!anomaly){write_csv(climate_ready, path = here("data","temp","corrected_climatedata.csv"))}
+```
+
+
+# Plotting to illustrate corrections
+## Choosing final temperatures to plot
+```{r, echo=FALSE}
+climate_corrected %>% 
+  distinct(final_temp) %>% 
+  pull -> plotting_temp
+
+# Selecting the second temperature, the 25%, 50% and 75% as well as the penultimate estimate
+plotting_temp <- plotting_temp[c(2,length(plotting_temp)/4,
+                                 length(plotting_temp)/2,
+                                 length(plotting_temp)*3/4,
+                                 length(plotting_temp)-1)]  
+```
+
+
+## Time Series to 2100
+### Original CMIP5
+```{r, echo=FALSE}
+climate %>% 
+  filter(iso %in% c("USA","CHN","AUT"),
+         final_temp %in% plotting_temp, 
+         year < 2101) %>% 
+  mutate(final_temp = round(final_temp,1)) %>% 
+  
+  ggplot(aes(x=year,y=temp,group=final_temp,color=iso)) + 
+  
+  geom_line() +
+  geom_hline(aes(yintercept = 0))+
+  
+  facet_grid(iso~final_temp,labeller = labeller(.cols = function(x){paste0(x,"°C Anomaly")})) + 
+  
+  scale_color_viridis_d()+
+  
+  labs(y="Temperature in °C",title = "Original CMIP5 Data",x="")+
+
+  theme(legend.position = "none", 
+        panel.grid.major = element_line(colour = "grey",size = 0.5),
+        panel.background = element_blank(),
+        text = element_text(family = "Georgia",size = 15)) 
+  
+```
+
+### Corrected
+
+```{r, echo=FALSE}
+climate_corrected %>% 
+  filter(iso %in% c("USA","CHN","AUT"),
+         final_temp %in% plotting_temp) %>% 
+  mutate(final_temp = round(final_temp,1)) %>% 
+  
+  ggplot(aes(x=year,y=temp,group=final_temp,color=iso)) + 
+  
+  geom_line() +
+  geom_hline(aes(yintercept = 0))+
+  
+  facet_grid(iso~final_temp,labeller = labeller(.cols = function(x){paste0(x,"°C Anomaly")})) + 
+  
+  scale_color_viridis_d()+
+  
+  labs(y="Temperature in °C",title = "Mean Corrected CMIP5 Data",x="")+
+
+  theme(legend.position = "none", 
+        panel.grid.major = element_line(colour = "grey",size = 0.5),
+        panel.background = element_blank(),
+        text = element_text(family = "Georgia",size = 15)) 
+```
+
+### Climate Ready
+```{r, echo=FALSE}
+climate_ready %>% 
+  filter(iso %in% c("USA","CHN","AUT"),
+         final_temp %in% plotting_temp) %>% 
+  mutate(final_temp = round(final_temp,1)) %>% 
+  
+  ggplot(aes(x=year,y=temp,group=final_temp,color=iso)) + 
+  
+  geom_line() +
+  geom_hline(aes(yintercept = 0))+
+  
+  facet_grid(iso~final_temp,labeller = labeller(.cols = function(x){paste0(x,"°C Anomaly")})) + 
+  
+  scale_color_viridis_d()+
+  
+  labs(y="Temperature in °C",title = "Mean Corrected CMIP5 Data",x="")+
+
+  theme(legend.position = "none", 
+        panel.grid.major = element_line(colour = "grey",size = 0.5),
+        panel.background = element_blank(),
+        text = element_text(family = "Georgia",size = 15))
+```
+
+
+
+## Checking corrections to 2020
+### Original CMIP5
+```{r, echo=FALSE} 
+climate %>% 
+  filter(iso %in% c("USA","CHN","AUT"),
+         final_temp %in% plotting_temp,
+         year < 2021) %>% 
+  mutate(final_temp = round(final_temp,1)) %>% 
+  
+  ggplot(aes(x=year,y=temp,group=final_temp,color=final_temp)) + 
+  
+  geom_line() +
+  geom_hline(aes(yintercept = 0))+
+  
+  facet_wrap(~iso,nrow=1)+
+  #facet_grid(iso~final_temp,labeller = labeller(.cols = function(x){paste0(x,"°C Anomaly")})) + 
+  
+  scale_color_viridis_c()+
+  
+  labs(y="Temperature in °C",title = "Original CMIP5 Data",x="")+
+
+  theme(panel.grid.major = element_line(colour = "grey",size = 0.5),
+        panel.background = element_blank(),
+        text = element_text(family = "Georgia",size = 15))
+  
+```
+
+### Climate Corrected
+```{r, echo=FALSE}
+climate_corrected %>% 
+  filter(iso %in% c("USA","CHN","AUT"),
+         final_temp %in% plotting_temp,
+         year < 2021) %>% 
+  mutate(final_temp = round(final_temp,1)) %>% 
+  
+  ggplot(aes(x=year,y=temp,group=final_temp,color=final_temp)) + 
+  
+  geom_line() +
+  geom_hline(aes(yintercept = 0))+
+  
+  facet_wrap(~iso,nrow=1)+
+  #facet_grid(iso~final_temp,labeller = labeller(.cols = function(x){paste0(x,"°C Anomaly")})) + 
+  
+  scale_color_viridis_c()+
+  
+  labs(y="Temperature in °C",title = "Mean Corrected CMIP5 Data",x="")+
+
+  theme(panel.grid.major = element_line(colour = "grey",size = 0.5),
+        panel.background = element_blank(),
+        text = element_text(family = "Georgia",size = 15))
+  
+```
+
+### Climate Ready
+```{r, echo=FALSE}
+climate_ready %>% 
+  filter(iso %in% c("USA","CHN","AUT"),
+         final_temp %in% plotting_temp,
+         year < 2021) %>% 
+  mutate(final_temp = round(final_temp,1)) %>% 
+  
+  ggplot(aes(x=year,y=temp,group=final_temp,color=final_temp)) + 
+  
+  geom_line() +
+  geom_hline(aes(yintercept = 0))+
+  
+  facet_wrap(~iso,nrow=1)+
+  #facet_grid(iso~final_temp,labeller = labeller(.cols = function(x){paste0(x,"°C Anomaly")})) + 
+  
+  scale_color_viridis_c()+
+  
+  labs(y="Temperature in °C",title = "Mean Corrected CMIP5 Data",x="")+
+
+  theme(panel.grid.major = element_line(colour = "grey",size = 0.5),
+        panel.background = element_blank(),
+        text = element_text(family = "Georgia",size = 15))
+  
+```
+
+
+
+

@@ -1,0 +1,726 @@
+---
+title: "Global-Level Analysis"
+author: "Moritz Schwarz and Felix Pretis"
+version: "October 2020"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+```{r,purl = FALSE}
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 10)
+```
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+library(MASS)
+
+library(quantreg)
+
+library(extrafont)
+library(RColorBrewer)
+library(Cairo)
+library(viridis)
+
+
+rm(list = ls())
+select <- dplyr::select
+```
+
+# Calculate all Quantiles
+```{r}
+for(type in c("lin","sq","cub")){
+  files  <- list.files(here("data","out"),pattern = "massive_EOC",full.names = T)
+  #files <- grep("BMS",files,value=T,ignore.case = FALSE)
+  
+  overall_df <- tibble()
+  for(i in 1:length(files)){
+    #for(i in c(6,18)){
+    print(list.files(here("data", "out"), pattern = "massive_EOC")[i])
+    load(files[i])
+    
+    tibble(name = gsub("_massive_EOC", "",
+                       gsub(".RData", "", list.files(here("data", "out"), pattern = "massive_EOC")[i], fixed = T))) %>%
+      mutate(name = case_when(name=="Mueller_interaction_log_selected_restricted"~"Mueller_gets_RestrAdapt",
+                              name=="Mueller_interaction_log_selected_unrestricted"~"Mueller_gets_URestrAdapt",
+                              name=="Mueller_interaction_log_selected_altrestr1"~"Mueller_gets_AltRestr1",
+                              name=="Mueller_interaction_log_selected_altrestr2"~"Mueller_gets_AltRestr2",
+                              name=="Mueller_lasso_interaction_log_selected_altrestr1"~"Mueller_lasso_AltRestr1",
+                              name=="Mueller_lasso_interaction_log_selected_altrestr2"~"Mueller_lasso_AltRestr2",
+                              
+                              name=="SSP_interaction_log_selected_restricted"~"SSP_gets_RestrAdapt",
+                              name=="SSP_interaction_log_selected_unrestricted"~"SSP_gets_URestrAdapt",
+                              name=="SSP_interaction_log_selected_altrestr1"~"SSP_gets_AltRestr1",
+                              name=="SSP_interaction_log_selected_altrestr2"~"SSP_gets_AltRestr2",
+                              name=="SSP_lasso_interaction_log_selected_altrestr1"~"SSP_lasso_AltRestr1",
+                              name=="SSP_lasso_interaction_log_selected_altrestr2"~"SSP_lasso_AltRestr2",
+                              TRUE~name)) %>% 
+      separate(name, sep = "_", into = c("baseline", "model","spec"),fill = "right") -> name_df
+    
+    baseline <- name_df$baseline
+    model <- name_df$model
+    specification <- ifelse(is.na(name_df$spec),"standard",name_df$spec)
+    
+    
+    if(model=="firstgets"){
+      model <- "gets"
+      specification <- "first"
+    }
+    if(model=="lastgets"){
+      model <- "gets"
+      specification <- "last"
+    }
+    if(model=="firstlasso"){
+      model <- "lasso"
+      specification <- "first"
+    }
+    if(model=="lastlasso"){
+      model <- "lasso"
+      specification <- "last"
+    }
+    
+    success <- FALSE
+    
+    massive_overall %>% 
+      distinct(final_temp)  -> temperature_axis
+    
+    
+    
+    if(baseline == "Mueller"){
+      while (!success) {
+        try({
+          
+          if(grepl("BMS",files[i])){
+            massive_overall %>% 
+              group_by(iso,final_temp) %>% 
+              summarise(diff = weighted.mean(diff,PMP_Exact),.groups="drop") -> massive_overall
+          }
+          
+          form <- "diff ~ final_temp"
+          if(type=="sq"){form <- paste0(form,"+ I(final_temp*final_temp)")}
+          if(type=="cub"){form <- paste0(form," + I(final_temp*final_temp) + I(final_temp*final_temp*final_temp)")}
+          form <- as.formula(form)
+          
+          vlow <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.025)
+          low <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.05)
+          midl <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.25)
+          med <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.5)
+          midh <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.75)
+          high <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.95)
+          vhigh <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.975)
+          
+          
+          tibble(
+            final_temp = temperature_axis$final_temp,
+            baseline = baseline,
+            model = model,
+            specification = specification,
+            scenario = "Hundred",
+            vlow  = predict(vlow, newdata = temperature_axis),
+            low  =  predict(low, newdata = temperature_axis),
+            midl  = predict(midl, newdata = temperature_axis),
+            med  =  predict(med, newdata = temperature_axis),
+            midh  = predict(midh, newdata = temperature_axis),
+            high  = predict(high, newdata = temperature_axis),
+            vhigh = predict(vhigh, newdata = temperature_axis)
+          ) %>% 
+            bind_rows(overall_df, .) -> overall_df
+          
+          success <- TRUE
+          
+        },silent = FALSE)
+      }
+      
+      
+    } else if (baseline == "SSP") {
+      
+      if(grepl("BMS",files[i])){
+        massive_overall %>% 
+          group_by(iso,final_temp) %>% 
+          summarise(diff_SSP1 = weighted.mean(diff_SSP1,PMP_Exact),
+                    diff_SSP2 = weighted.mean(diff_SSP2,PMP_Exact),
+                    diff_SSP3 = weighted.mean(diff_SSP3,PMP_Exact),
+                    diff_SSP4 = weighted.mean(diff_SSP4,PMP_Exact),
+                    diff_SSP5 = weighted.mean(diff_SSP5,PMP_Exact),.groups="drop") -> massive_overall
+      }
+      
+      for (scen in 1:5){
+        print(paste0("SSP ",scen))
+        success <- FALSE
+        while(!success){
+          try({
+            form <- paste0("diff_SSP",scen," ~ final_temp")
+            if(type=="sq"){form <- paste0(form,"+ I(final_temp*final_temp)")}
+            if(type=="cub"){form <- paste0(form," + I(final_temp*final_temp) + I(final_temp*final_temp*final_temp)")}
+            form <- as.formula(form)
+            
+            vlow <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.025)
+            low <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.05)
+            midl <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.25)
+            med <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.5)
+            midh <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.75)
+            high <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.95)
+            vhigh <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.975)
+            
+            
+            tibble(
+              final_temp = temperature_axis$final_temp,
+              baseline = baseline,
+              model = model,
+              specification = specification,
+              scenario = as.character(scen),
+              vlow  = predict(vlow, newdata = temperature_axis),
+              low  =  predict(low, newdata = temperature_axis),
+              midl  = predict(midl, newdata = temperature_axis),
+              med  =  predict(med, newdata = temperature_axis),
+              midh  = predict(midh, newdata = temperature_axis),
+              high  = predict(high, newdata = temperature_axis),
+              vhigh = predict(vhigh, newdata = temperature_axis)
+            ) %>%
+              bind_rows(overall_df, .) -> overall_df
+            
+            success <- TRUE
+            
+          },silent = FALSE)
+        }
+      }
+    }
+    rm(vlow,low,midh,midl,med,high,vhigh)
+  }
+  
+  
+  
+  overall_df %>% 
+    arrange(baseline,model,specification,scenario,final_temp) -> overall_df
+  
+  
+  write_csv(overall_df,here("data","out",paste0("all_models_quantiles_26Oct_",type,".csv")))
+}
+
+
+```
+
+
+# Check
+
+```{r, eval=FALSE}
+overall_df %>% distinct(baseline,model,specification,scenario) %>% View
+```
+
+
+# Plot Loop
+
+
+```{r}
+slope.val <- 1.5
+mean_slope <- (slope.val/1000) #1000 to make it K/1000 GtC and 3.667 to convert C to CO2 - aka /3667. Conversion rate is from https://www.ipcc.ch/pdf/special-reports/srccs/srccs_annex1.pdf Table AI.6 IPCC Special Report on Carbon dioxide Capture and Storage
+
+for(type in c("lin","sq","cub")){
+  
+  # Load
+  overall_df <- read_csv(here("data","out",paste0("all_models_quantiles_26Oct_",type,".csv")))
+  
+  ## MSW: standard: gets, lasso, BMS, BHM
+  overall_df %>% 
+    mutate(baseline=ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+    mutate(model=case_when(model=="BHM"~"AATPsq",
+                           model=="BMS1"~"BMS-Uniform",
+                           model=="BMS2"~"BMS-Fixed",
+                           model=="BMS3"~"BMS-PIP",
+                           TRUE~model)) %>% 
+    filter(baseline=="MSW",specification == "standard") %>% 
+    
+    mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+    mutate(model = factor(model,levels = c("gets","LASSO","AATPsq","BMS-Uniform","BMS-Fixed","BMS-PIP"))) %>% 
+    ggplot(aes(x=final_temp,fill=model)) + 
+    
+    geom_hline(aes(yintercept = 0)) +
+    geom_ribbon(aes(ymin = midl,ymax = midh),alpha=0.2)+
+    geom_ribbon(aes(ymin = low,ymax = high),alpha=0.2)+
+    geom_ribbon(aes(ymin = vlow,ymax = vhigh),alpha=0.2)+
+    geom_line(aes(y=med)) + 
+    facet_wrap(~model) +
+    
+    #scale_fill_brewer(palette = "RdBu")+
+    scale_fill_viridis_d() +
+    scale_y_continuous(labels = scales::percent)+
+    scale_x_continuous(labels = function(x){paste0(x,"°C")},sec.axis = sec_axis(trans= ~./mean_slope,name = "Cumulative Emissions (GtC)"))+
+    coord_cartesian(ylim = c(-1,1))+
+    
+    labs(x="Temperature Anomaly",y="GDP per capita impact to baseline",
+         title = "Standard Model Projections",subtitle = "IQR, 90% CI and 95% CI.")+
+    
+    theme_minimal() + 
+    theme(legend.position = "none",
+          panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+          text = element_text(family = "Georgia",size = 10),
+          axis.text.x.top = element_text(size = 5)) + 
+    ggsave(here("output","figures",paste0("DamageFunction_Standard_Headline_",type,".jpg")),width = 6,height = 4)
+  
+  
+  
+  ## MSW: Adaptation: gets + lasso
+  overall_df %>% 
+    mutate(baseline=ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+    mutate(model=ifelse(model=="BHM","AATPsq",model),
+           model=ifelse(model=="lasso","LASSO",model),
+           specification=case_when(specification=="AltRestr1"~"Income Adaptation",
+                                   specification=="first"~"First Estimate",
+                                   specification=="last"~"Last Estimate",
+                                   TRUE~specification)) %>% 
+    
+    filter(baseline=="MSW",specification != "standard") %>% 
+    
+    filter(!specification %in% c("RestrAdapt","AltRestr2")) %>% 
+    
+    mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+    mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+    mutate(specification = factor(specification,levels=c("Income Adaptation","First Estimate","Last Estimate"))) %>% 
+    
+    # Add the standard projection median to be shown as a dashed line
+    full_join(overall_df %>% 
+                filter(specification=="standard",
+                       baseline=="Mueller",
+                       model %in% c("gets","LASSO")) %>% 
+                mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+                mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+                select(final_temp,model,med) %>% 
+                rename(standard = med),by=c("final_temp","model")) %>% 
+    
+    ggplot(aes(x=final_temp,fill=model)) + 
+    
+    geom_hline(aes(yintercept = 0)) +
+    geom_ribbon(aes(ymin = midl,ymax = midh),alpha=0.2)+
+    geom_ribbon(aes(ymin = low,ymax = high),alpha=0.2)+
+    geom_ribbon(aes(ymin = vlow,ymax = vhigh),alpha=0.2)+
+    geom_line(aes(y=med)) + 
+    
+    geom_line(aes(y=standard),linetype=2)+
+    
+    facet_grid(model~specification) +
+    
+    scale_fill_viridis_d() +
+    scale_y_continuous(labels = scales::percent)+
+    scale_x_continuous(labels = function(x){paste0(x,"°C")},sec.axis = sec_axis(trans= ~./mean_slope,name = "Cumulative Emissions (GtC)"))+
+    coord_cartesian(ylim = c(-1,1))+
+    
+    labs(x="Temperature Anomaly",y="GDP per capita impact to baseline (MSW)",
+         title = "Adaptation Model Projections",subtitle = "IQR, 90% CI and 95% CI.\nDashed line is Standard Median Projection.")+
+    
+    theme_minimal() + 
+    theme(legend.position = "none",
+          panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+          text = element_text(family = "Georgia",size = 10),
+          axis.text.x.top = element_text(size = 5)) + 
+    ggsave(here("output","figures",paste0("DamageFunction_Adaptation_MSW_",type,".jpg")),width = 6,height = 4)
+  
+  
+  
+  
+  ## SSP 2: Adaptation: gets + lasso
+  overall_df %>% 
+    #mutate(baseline=ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+    mutate(model=ifelse(model=="BHM","AATPsq",model),
+           model=ifelse(model=="lasso","LASSO",model),
+           specification=case_when(specification=="AltRestr1"~"Income Adaptation",
+                                   specification=="first"~"First Estimate",
+                                   specification=="last"~"Last Estimate",
+                                   TRUE~specification)) %>% 
+    
+    filter(baseline=="SSP",specification != "standard",scenario=="2") %>% 
+    
+    filter(!specification %in% c("RestrAdapt","AltRestr2")) %>% 
+    
+    mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+    mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+    mutate(specification = factor(specification,levels=c("Income Adaptation","First Estimate","Last Estimate"))) %>% 
+    
+    # Add the standard projection median to be shown as a dashed line
+    full_join(overall_df %>% 
+                filter(specification=="standard",
+                       baseline=="SSP",
+                       scenario=="2",
+                       model %in% c("gets","LASSO")) %>% 
+                mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+                mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+                select(final_temp,model,med) %>% 
+                rename(standard = med),by=c("final_temp","model")) %>% 
+    
+    ggplot(aes(x=final_temp,fill=model)) + 
+    
+    geom_hline(aes(yintercept = 0)) +
+    geom_ribbon(aes(ymin = midl,ymax = midh),alpha=0.2)+
+    geom_ribbon(aes(ymin = low,ymax = high),alpha=0.2)+
+    geom_ribbon(aes(ymin = vlow,ymax = vhigh),alpha=0.2)+
+    geom_line(aes(y=med)) + 
+    
+    geom_line(aes(y=standard),linetype=2)+
+    
+    facet_grid(model~specification) +
+    
+    scale_fill_viridis_d() +
+    scale_y_continuous(labels = scales::percent)+
+    scale_x_continuous(labels = function(x){paste0(x,"°C")},sec.axis = sec_axis(trans= ~./mean_slope,name = "Cumulative Emissions (GtC)"))+
+    coord_cartesian(ylim = c(-1,1))+
+    
+    labs(x="Temperature Anomaly",y="GDP per capita impact to baseline (SSP2)",
+         title = "Adaptation Model Projections",subtitle = "IQR, 90% CI and 95% CI.\nDashed line is Standard Median Projection.")+
+    
+    theme_minimal() + 
+    theme(legend.position = "none",
+          panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+          text = element_text(family = "Georgia",size = 10),
+          axis.text.x.top = element_text(size = 5)) + 
+    ggsave(here("output","figures",paste0("DamageFunction_Adaptation_SSP2_",type,".jpg")),width = 6,height = 4)
+  
+  
+  
+  
+  ## SSP: Adaptation: gets 
+  overall_df %>% 
+    #mutate(baseline=ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+    mutate(model=ifelse(model=="BHM","AATPsq",model),
+           model=ifelse(model=="lasso","LASSO",model),
+           specification=case_when(specification=="AltRestr1"~"Income Adaptation",
+                                   specification=="first"~"First Estimate",
+                                   specification=="last"~"Last Estimate",
+                                   TRUE~specification)) %>% 
+    
+    filter(baseline=="SSP",specification != "standard", model=="gets") %>% 
+    mutate(scenario = paste0("SSP",scenario)) %>% 
+    mutate(scenario = factor(scenario,levels = c("SSP1","SSP2","SSP3","SSP4","SSP5"))) %>% 
+    filter(!specification %in% c("RestrAdapt","AltRestr2")) %>% 
+    
+    mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+    mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+    mutate(specification = factor(specification,levels=c("Income Adaptation","First Estimate","Last Estimate"))) %>% 
+    
+    # Add the standard projection median to be shown as a dashed line
+    full_join(overall_df %>% 
+                filter(specification=="standard",
+                       baseline=="SSP",
+                       scenario=="2",
+                       model %in% c("gets")) %>% 
+                mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+                select(final_temp,model,med) %>% 
+                rename(standard = med),by=c("final_temp","model")) %>% 
+    
+    ggplot(aes(x=final_temp,fill=scenario)) + 
+    
+    geom_hline(aes(yintercept = 0)) +
+    geom_ribbon(aes(ymin = midl,ymax = midh),alpha=0.2)+
+    geom_ribbon(aes(ymin = low,ymax = high),alpha=0.2)+
+    geom_ribbon(aes(ymin = vlow,ymax = vhigh),alpha=0.2)+
+    geom_line(aes(y=med)) + 
+    
+    geom_line(aes(y=standard),linetype=2)+
+    
+    facet_grid(scenario~specification) +
+    
+    scale_fill_viridis_d() +
+    scale_y_continuous(labels = scales::percent)+
+    scale_x_continuous(labels = function(x){paste0(x,"°C")},sec.axis = sec_axis(trans= ~./mean_slope,name = "Cumulative Emissions (GtC)"))+
+    coord_cartesian(ylim = c(-1,1))+
+    
+    labs(x="Temperature Anomaly",y="GDP per capita impact to baseline",
+         title = "Adaptation Model Projections",subtitle = "IQR, 90% CI and 95% CI.\nDashed line is Standard Median Projection.")+
+    
+    theme_minimal() + 
+    theme(legend.position = "none",
+          panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+          text = element_text(family = "Georgia",size = 10),
+          axis.text.x.top = element_text(size = 5)) + 
+    ggsave(here("output","figures",paste0("DamageFunction_Adaptation_SSP_gets_",type,".jpg")),width = 6,height = 6)
+  
+  
+  
+  
+  ## SSP: Adaptation: lasso
+  
+  overall_df %>% 
+    #mutate(baseline=ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+    mutate(model=ifelse(model=="BHM","AATPsq",model),
+           model=ifelse(model=="lasso","LASSO",model),
+           specification=case_when(specification=="AltRestr1"~"Income Adaptation",
+                                   specification=="first"~"First Estimate",
+                                   specification=="last"~"Last Estimate",
+                                   TRUE~specification)) %>% 
+    
+    filter(baseline=="SSP",specification != "standard", model=="LASSO") %>% 
+    mutate(scenario = paste0("SSP",scenario)) %>% 
+    mutate(scenario = factor(scenario,levels = c("SSP1","SSP2","SSP3","SSP4","SSP5"))) %>% 
+    filter(!specification %in% c("RestrAdapt","AltRestr2")) %>% 
+    
+    mutate(specification = factor(specification,levels=c("Income Adaptation","First Estimate","Last Estimate"))) %>% 
+    
+    mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+    mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+    
+    # Add the standard projection median to be shown as a dashed line
+    full_join(overall_df %>% 
+                filter(specification=="standard",
+                       baseline=="SSP",
+                       scenario=="2",
+                       model %in% c("LASSO")) %>% 
+                mutate(across(c(vlow,low,midl,med,midh,high,vhigh),~.-1)) %>% 
+                select(final_temp,model,med) %>% 
+                rename(standard = med),by=c("final_temp","model")) %>% 
+    
+    ggplot(aes(x=final_temp,fill=scenario)) + 
+    
+    geom_hline(aes(yintercept = 0)) +
+    geom_ribbon(aes(ymin = midl,ymax = midh),alpha=0.2)+
+    geom_ribbon(aes(ymin = low,ymax = high),alpha=0.2)+
+    geom_ribbon(aes(ymin = vlow,ymax = vhigh),alpha=0.2)+
+    geom_line(aes(y=med)) + 
+    
+    geom_line(aes(y=standard),linetype=2)+
+    
+    facet_grid(scenario~specification) +
+    
+    scale_fill_viridis_d() +
+    scale_y_continuous(labels = scales::percent)+
+    scale_x_continuous(labels = function(x){paste0(x,"°C")},sec.axis = sec_axis(trans= ~./mean_slope,name = "Cumulative Emissions (GtC)"))+
+    coord_cartesian(ylim = c(-1,1))+
+    
+    labs(x="Temperature Anomaly",y="GDP per capita impact to baseline",
+         title = "Adaptation Model Projections",subtitle = "IQR, 90% CI and 95% CI.\nDashed line is Standard Median Projection.")+
+    
+    theme_minimal() + 
+    theme(legend.position = "none",
+          panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+          text = element_text(family = "Georgia",size = 10),
+          axis.text.x.top = element_text(size = 5)) + 
+    ggsave(here("output","figures",paste0("DamageFunction_Adaptation_SSP_lasso_",type,".jpg")),width = 6,height = 6)
+  
+}
+
+```
+
+
+
+
+# Marginal
+
+```{r}
+marginal_values <- function(model,x){
+    result <- coefficients(model)[2]+2*coefficients(model)[3]*x
+    if(cubic){result <- coefficients(model)[2] + 2*coefficients(model)[3]*x + 3*coefficients(model)[4] * x^2}
+    return(result)
+}
+
+cubic <- FALSE
+
+for(type in c("sq")){
+  files  <- list.files(here("data","out"),pattern = "massive_EOC",full.names = T)
+  #files <- grep("BMS",files,value=T,ignore.case = FALSE)
+  
+  overall_df <- tibble()
+  #for(i in 1:length(files)){
+  for(i in c(5,6,7,8,11,13,14,15)){
+    #for(i in c(6,18)){
+    print(list.files(here("data", "out"), pattern = "massive_EOC")[i])
+    load(files[i])
+    
+    tibble(name = gsub("_massive_EOC", "",
+                       gsub(".RData", "", list.files(here("data", "out"), pattern = "massive_EOC")[i], fixed = T))) %>%
+      mutate(name = case_when(name=="Mueller_interaction_log_selected_restricted"~"Mueller_gets_RestrAdapt",
+                              name=="Mueller_interaction_log_selected_unrestricted"~"Mueller_gets_URestrAdapt",
+                              name=="Mueller_interaction_log_selected_altrestr1"~"Mueller_gets_AltRestr1",
+                              name=="Mueller_interaction_log_selected_altrestr2"~"Mueller_gets_AltRestr2",
+                              name=="Mueller_lasso_interaction_log_selected_altrestr1"~"Mueller_lasso_AltRestr1",
+                              name=="Mueller_lasso_interaction_log_selected_altrestr2"~"Mueller_lasso_AltRestr2",
+                              
+                              name=="SSP_interaction_log_selected_restricted"~"SSP_gets_RestrAdapt",
+                              name=="SSP_interaction_log_selected_unrestricted"~"SSP_gets_URestrAdapt",
+                              name=="SSP_interaction_log_selected_altrestr1"~"SSP_gets_AltRestr1",
+                              name=="SSP_interaction_log_selected_altrestr2"~"SSP_gets_AltRestr2",
+                              name=="SSP_lasso_interaction_log_selected_altrestr1"~"SSP_lasso_AltRestr1",
+                              name=="SSP_lasso_interaction_log_selected_altrestr2"~"SSP_lasso_AltRestr2",
+                              TRUE~name)) %>% 
+      separate(name, sep = "_", into = c("baseline", "model","spec"),fill = "right") -> name_df
+    
+    baseline <- name_df$baseline
+    model <- name_df$model
+    specification <- ifelse(is.na(name_df$spec),"standard",name_df$spec)
+    
+    
+    if(model=="firstgets"){
+      model <- "gets"
+      specification <- "first"
+    }
+    if(model=="lastgets"){
+      model <- "gets"
+      specification <- "last"
+    }
+    if(model=="firstlasso"){
+      model <- "lasso"
+      specification <- "first"
+    }
+    if(model=="lastlasso"){
+      model <- "lasso"
+      specification <- "last"
+    }
+    
+    success <- FALSE
+    
+    massive_overall %>% 
+      distinct(final_temp) %>%
+      pull(final_temp) -> temperature_axis
+    
+    
+    
+    if(baseline == "Mueller"){
+      while (!success) {
+        try({
+          
+          if(grepl("BMS",files[i])){
+            massive_overall %>% 
+              group_by(iso,final_temp) %>% 
+              summarise(diff = weighted.mean(diff,PMP_Exact),.groups="drop") -> massive_overall
+          }
+          
+          form <- "diff ~ final_temp + I(final_temp*final_temp)"
+          if(type=="sq"){form <- paste0(form,"+ I(final_temp*final_temp)")}
+          if(type=="cub"){form <- paste0(form," + I(final_temp*final_temp) + I(final_temp*final_temp*final_temp)")}
+          form <- as.formula(form)
+          
+          vlow <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.025)
+          low <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.05)
+          midl <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.25)
+          med <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.5)
+          midh <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.75)
+          high <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.95)
+          vhigh <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.975)
+          
+          
+          tibble(
+            final_temp = temperature_axis,
+            baseline = baseline,
+            model = model,
+            specification = specification,
+            scenario = "Hundred",
+            vlow  = marginal_values(vlow, x = temperature_axis),
+            low  =  marginal_values(low, x = temperature_axis),
+            midl  = marginal_values(midl, x = temperature_axis),
+            med  =  marginal_values(med, x = temperature_axis),
+            midh  = marginal_values(midh, x = temperature_axis),
+            high  = marginal_values(high, x = temperature_axis),
+            vhigh = marginal_values(vhigh, x = temperature_axis)
+          ) %>% 
+            bind_rows(overall_df, .) -> overall_df
+          
+          success <- TRUE
+          
+        },silent = FALSE)
+      }
+      
+      
+    } else if (baseline == "SSP") {
+      
+      if(grepl("BMS",files[i])){
+        massive_overall %>% 
+          group_by(iso,final_temp) %>% 
+          summarise(diff_SSP1 = weighted.mean(diff_SSP1,PMP_Exact),
+                    diff_SSP2 = weighted.mean(diff_SSP2,PMP_Exact),
+                    diff_SSP3 = weighted.mean(diff_SSP3,PMP_Exact),
+                    diff_SSP4 = weighted.mean(diff_SSP4,PMP_Exact),
+                    diff_SSP5 = weighted.mean(diff_SSP5,PMP_Exact),.groups="drop") -> massive_overall
+      }
+      
+      for (scen in 1:5){
+        print(paste0("SSP ",scen))
+        success <- FALSE
+        while(!success){
+          try({
+            form <- paste0("diff_SSP",scen," ~ final_temp")
+            if(type=="sq"){form <- paste0(form,"+ I(final_temp*final_temp)")}
+            if(type=="cub"){form <- paste0(form," + I(final_temp*final_temp) + I(final_temp*final_temp*final_temp)")}
+            form <- as.formula(form)
+            
+            vlow <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.025)
+            low <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.05)
+            midl <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.25)
+            med <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.5)
+            midh <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.75)
+            high <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.95)
+            vhigh <- rq(formula = form, data = massive_overall,method = "pfn",tau = 0.975)
+            
+            
+            tibble(
+              final_temp = temperature_axis,
+              baseline = baseline,
+              model = model,
+              specification = specification,
+              scenario = as.character(scen),
+              vlow  = marginal_values(vlow, x = temperature_axis),
+              low  =  marginal_values(low, x = temperature_axis),
+              midl  = marginal_values(midl, x = temperature_axis),
+              med  =  marginal_values(med, x = temperature_axis),
+              midh  = marginal_values(midh, x = temperature_axis),
+              high  = marginal_values(high, x = temperature_axis),
+              vhigh = marginal_values(vhigh, x = temperature_axis)
+            ) %>%
+              bind_rows(overall_df, .) -> overall_df
+            
+            success <- TRUE
+            
+          },silent = FALSE)
+        }
+      }
+    }
+    rm(vlow,low,midh,midl,med,high,vhigh)
+  }
+  
+  
+  
+  overall_df %>% 
+    arrange(baseline,model,specification,scenario,final_temp) -> overall_df
+  
+  
+  write_csv(overall_df,here("data","out",paste0("all_models_marginal_quantiles_26Oct_",type,".csv")))
+}
+
+```
+
+
+```{r}
+overall_df %>% 
+  mutate(baseline = ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+  mutate(model = ifelse(model=="lasso","LASSO",model)) %>% 
+  filter(baseline=="MSW",
+         #model=="gets",
+         specification %in% c("standard","first","last","AltRestr1"),
+         scenario=="Hundred") %>% 
+  select(final_temp,model,specification,med) %>% 
+  #pivot_wider(id_cols = c(final_temp,iso),names_from=specification,values_from=med) %>% 
+  
+  ggplot(aes(x=final_temp,color=specification,group=specification)) + 
+  geom_line(aes(y=med))+
+  geom_hline(aes(yintercept = 0),size=2)+
+  
+  scale_color_viridis_d()+
+  #scale_color_brewer(palette = "RdBu")+
+  
+  facet_wrap(~model) + 
+  scale_y_continuous(labels = scales::percent)+
+  scale_x_continuous(labels = function(x){paste0(x,"°C")})+
+  labs(y="Marginal Impact",x="Temperature Anomaly")+
+  theme(legend.position = "bottom",
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(family = "Georgia")) + 
+  ggsave(filename = here("output","figures","MarginalManual_global_sq.jpg"),height = 6,width = 6)
+  
+  
+```
+

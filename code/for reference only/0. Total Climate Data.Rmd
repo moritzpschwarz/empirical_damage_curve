@@ -1,0 +1,115 @@
+---
+title: "Create the Total Climate Data"
+author: "Moritz Schwarz and Felix Pretis"
+version: "2 June 2020"
+output:
+  html_document:
+    df_print: paged
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+
+**October 2020:**
+This script creates the climate_variables_total.csv file. 
+It takes all individual CMIP5 model files as input and then merges them together. 
+
+
+```{r setup}
+library(tidyverse)
+library(data.table)
+knitr::opts_knit$set(root.dir = "..")
+rm(list=ls())
+```
+
+```{r}
+temp_curve <- read.csv("data/temp/cmip_end_temperature_anomaly_2090-2099_climateexplorer.csv")
+temp_curve <- temp_curve[order(temp_curve$Temperature.in.2100),]
+```
+
+```{r}
+all.files <- list.files(recursive = TRUE,full.names = TRUE,
+                        "C:/Users/morit/Documents/Oxford/Subjects/Dissertation/Code and Data/data/output/Sillmann/",
+                        pattern = "*.csv")#list all the HADEX variables
+all.files <- append(all.files,list.files(
+  "C:/Users/morit/Documents/Oxford/Subjects/Dissertation/Code and Data/data/output/CMIP5/merged/",
+  pattern = "*nc.csv",
+  full.names = TRUE)) #list all the temperature variables
+```
+
+
+```{r, warning=FALSE}
+nlimit <- nrow(temp_curve)
+overall_df <- data.table()
+for (i in 1:nlimit){
+  #i <- 1
+  #print(paste0("Model ",temp_curve$Model.Name[i]," which is Model ",i," out of ",nlimit))
+  svMisc::progress(i,max.value = nlimit)
+  
+  name_match <- all.files[grepl(temp_curve$Model.Name[i],all.files)] #here it finds the file path of all variable files for model i 
+  
+  #special case of bcc-csm1-1 and bcc-csm1-1-m and NorESM1-M because their names must be more explicit because otherwise it will grepl more than one model - not a substantial issue and completely fixed like this 
+  if(temp_curve$Model.Name[i]=="NorESM1-M"){next} # because only arctic
+  if(temp_curve$Model.Name[i]=="bcc-csm1-1"){
+    name_match<- append(all.files[grepl("bcc-csm1-1-r",all.files)],all.files[grepl("temp_Amon_bcc-csm1-1_r",all.files)])
+    name_match<- append(name_match,all.files[grepl("prcp_Amon_bcc-csm1-1_r",all.files)])
+  }
+  
+  #special case for MIROC ESM-CHEM; justification as above
+  if(temp_curve$Model.Name[i]=="MIROC-ESM"){
+    name_match<- append(all.files[grepl("MIROC-ESM-r",all.files)],all.files[grepl("temp_Amon_MIROC-ESM_r",all.files)])
+    name_match<- append(name_match,all.files[grepl("prcp_Amon_MIROC-ESM_r",all.files)])
+  }
+  
+  # from the model files, it subsets the files which correspond to the right RCP scenario, with respect to i
+  rcp_match <- name_match[grepl(temp_curve$RCP[i],name_match)]
+  #and finally those which correspond to the right ensemble as well, always with respect to i
+  ensemble_match <- rcp_match[grepl(temp_curve$Ensemble[i],rcp_match)] 
+  
+  
+  
+  if(any(grepl("ACCESS1-3_rcp45_r1i1p1",ensemble_match))){next}
+  if(any(grepl("bcc-csm1-1_rcp85_r1i1p1",ensemble_match))){next}
+  if(any(grepl("prcp_Amon_EC-EARTH_rcp45_r1i1p1_nc.csv",ensemble_match))){next}
+  
+  
+  # if there is no file in there move to the next file - this should not happen 
+  # if it does happen, it would stop the whole code! so if everything runs, it's fine
+  if(length(ensemble_match)==0){STOP} 
+  
+  
+  rm(ensemble_data)
+  for(variable in 1:length(ensemble_match)){
+    #variable=1
+    if(variable==1){
+      fread(ensemble_match[variable]) %>% 
+        select(-matches("V1")) -> ensemble_data
+    } else {
+      fread(ensemble_match[variable]) %>% 
+        select(-matches("V1")) %>% 
+        full_join(ensemble_data,by=c("year","iso")) -> ensemble_data
+    }
+  }
+  names(ensemble_data) <- str_split(names(ensemble_data),pattern = "-|_") %>% sapply(.,tail,1)
+  
+  ensemble_data %>% 
+    rename(temp = tas, 
+           prcp = pr) -> ensemble_data
+  
+  ensemble_data %>% 
+    mutate(model = temp_curve$Model.Name[i],
+           rcp = temp_curve$RCP[i],
+           ensemble = temp_curve$Ensemble[i],
+           final_temp = temp_curve$Temperature.in.2100[i]) %>% 
+    select(model,rcp,ensemble, final_temp, year, iso, everything()) %>% 
+    bind_rows(overall_df,.) -> overall_df
+  
+}
+ 
+tail(overall_df)
+
+overall_df %>% 
+  mutate(temp = temp - 273.15) -> overall_df
+
+data.table::fwrite(x = overall_df,file = "data/out/climate_variables_total.csv",row.names = FALSE)
+```

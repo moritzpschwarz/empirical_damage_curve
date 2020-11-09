@@ -1,0 +1,223 @@
+---
+title: "SSP Projection"
+subtitle: "Bayesian Model Selection"
+author: "Moritz Schwarz and Felix Pretis"
+version: "October 2020"
+output:
+  html_document:
+  df_print: paged
+  toc: true
+  toc_depth: 2
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+```{r,purl = FALSE}
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 10)
+```
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+library(MASS)
+
+library(extrafont)
+library(RColorBrewer)
+library(Cairo)
+library(viridis)
+
+
+rm(list = ls())
+select <- dplyr::select
+```
+
+
+<!-- **To create Server Script: Save first then** -->
+<!-- ```{r,eval= TRUE, purl = FALSE} -->
+<!-- knitr::purl(here("code","4b. SSP Effect Projections - BMS.Rmd"),output = here("code","4b. Server_SSP_BMS.R")) -->
+<!-- ``` -->
+
+
+
+
+# SSP
+## Process 
+```{r}
+SSP_wide <- vroom(file=here("data","raw","SspDb_country_data_2013-06-12.csv"))
+
+SSP_wide %>% 
+  filter(MODEL == "OECD Env-Growth") %>% 
+  filter(VARIABLE %in% c("Population","GDP|PPP")) %>% 
+  pivot_longer(cols = -c(MODEL,SCENARIO,REGION,VARIABLE,UNIT),names_to = "YEAR") %>% 
+  mutate(YEAR = YEAR %>% as.character %>% as.integer) %>% 
+  pivot_wider(id_cols = c(MODEL,SCENARIO,REGION,YEAR),names_from = VARIABLE) %>% 
+  
+  mutate(GDP = `GDP|PPP`*1000000000,
+         `GDP|PPP`=NULL,
+         POPULATION = `Population`*1000000,
+         `Population`=NULL,
+         GDP_pc = GDP/POPULATION,
+         MODEL = NULL,
+         SCENARIO = gsub("_v9_130325","",SCENARIO)) %>% 
+  
+  filter(!YEAR == 2000) %>% 
+  drop_na -> ssp
+```
+
+## Interpolate SSPs using a simple spline
+```{r}
+ssp %>% 
+  select(REGION) %>% 
+  unique %>% 
+  slice(rep(1:n(), each = 90)) %>%
+  group_by(REGION) %>% 
+  mutate(YEAR = 1:90) %>% 
+  ungroup() %>% 
+  mutate(YEAR = YEAR + 2009) %>% 
+  full_join(ssp %>% 
+              select(-GDP,-POPULATION) %>% 
+              filter(YEAR >2005) %>% 
+              pivot_wider(id_cols = c(REGION,YEAR),values_from = "GDP_pc",names_from = "SCENARIO"),by=c("REGION","YEAR")) %>% 
+  group_by(REGION) %>% 
+  mutate(SSP1 = zoo::na.spline(SSP1,YEAR),
+         SSP2 = zoo::na.spline(SSP2,YEAR),
+         SSP3 = zoo::na.spline(SSP3,YEAR),
+         SSP4 = zoo::na.spline(SSP4,YEAR),
+         SSP5 = zoo::na.spline(SSP5,YEAR)) %>% 
+  ungroup %>% 
+  rename(iso = REGION,
+         year = YEAR) -> ssp
+
+#write.csv(ssp,"ssp/ssp_interpolated.csv",row.names = F)
+```
+
+```{r}
+ssp %>% 
+  group_by(iso) %>% 
+  mutate(across(.cols = starts_with("SSP"),.fns = ~./lag(.))) %>% 
+  ungroup %>% 
+  drop_na %>% 
+  rename_with(.cols = starts_with("SSP"),.fn = ~paste0(.,"_g"))-> ssp_growth
+```
+
+Prepare the SSP dataframe so that it has: 1) the SSP growth rates 2) the SSP Climate Placeholders starting in 2011
+```{r}
+ssp_growth %>% 
+  #left_join(ssp,by=c("iso","year")) %>% 
+  left_join(ssp %>% 
+              filter(year == 2011) %>% 
+              rename_with(.cols = starts_with("SSP"),.fn = ~paste0(.,"_clim")),by=c("iso","year")) -> ssp_ready
+```
+
+
+# Bayesian Model Averaging
+## Load climate data
+```{r}
+## Load climate data
+climate <- vroom(here("data","temp","corrected_anomaly_climatedata.csv"))
+```
+
+## Load BMS Coefficients
+Those are calculated in the script 1a. Estimate Models.Rmd
+```{r}
+for (j in 1:4){
+  
+  
+  read_csv(here("data","temp",paste0("BMS_Model_",j,"_coefficients.csv"))) %>% 
+    pivot_wider(id_cols = c(model,PMP_Exact,PMP_MCMC), values_from = coef,names_from = variable) %>% 
+    rename_with(.cols = -c(model,PMP_Exact,PMP_MCMC),.fn = ~paste0(tolower(.),"_coef")) -> bms_coef
+  
+  if(!nrow(bms_coef)==0){ # We need this because BMS Model 4 has no remaining coefficients
+    
+    ## Project (Server)
+    
+    library(doMC)
+    registerDoMC(if(nrow(bms_coef) < detectCores()){max(1,nrow(bms_coef))} else {detectCores()-1})  # nrow(bms_coef) if enough cores available - otherwise total cores-1
+    foreach(v=1:nrow(bms_coef),.packages = loadedNamespaces()) %dopar% {
+      #for (v in 1:nrow(bms_coef)){
+      print(paste0("BMS Prior ",j," Specific Model ",v))
+      
+      bms_coef %>% 
+        filter(model==v) %>% 
+        select_if(~sum(!is.na(.)) > 0) -> bms_coef_current  # select only columns that are not all NA 
+      
+      if(!nrow(bms_coef_current)==0){
+        
+        climate_vars <- bms_coef_current %>% 
+          select(-model,-PMP_Exact,-PMP_MCMC) %>% 
+          names %>% gsub("_coef","",.)
+        
+        climate %>% 
+          select(model,rcp,ensemble,final_temp,iso,year,all_of(climate_vars)) %>% 
+          drop_na -> climate_subset
+        
+        
+        # Calculate the climate effect
+        effect_BMS <- climate_subset
+        for(var in climate_vars){
+          print(var)
+          climate_subset %>% 
+            select(all_of(var)) %>% 
+            pull %>% "*"(bms_coef_current %>% 
+                           #slice(v) %>% 
+                           select(all_of(paste0(var,"_coef"))) %>% 
+                           pull) %>%
+            as_tibble %>% 
+            rename_all(~paste0(var,"_effect"))  %>% 
+            bind_cols(effect_BMS,.) -> effect_BMS
+        }
+        
+        done <- ssp_ready %>% 
+          filter(year==2011) %>% 
+          left_join(effect_BMS %>% 
+                      filter(year == 2011) %>% 
+                      select(-model,-ensemble,-rcp),by = c("iso","year")) %>% 
+          mutate(realisation = v) %>% 
+          relocate(c(realisation,final_temp), .after = year)
+        
+        
+        
+        for(i in 2012:2099){
+          print(paste0("Realisation ",v," Year: ",i))
+          done %>% 
+            filter(year == i-1) %>% 
+            select(iso, year, realisation, final_temp,ends_with("_clim")) %>% #contains(SSP_scenarios_running)
+            
+            inner_join(ssp_ready %>% 
+                         select(-ends_with("_clim")) %>% 
+                         filter(year == i-1), by = c("iso","year")) %>% 
+            # this step: 
+            left_join(effect_BMS %>% 
+                        filter(year == i-1) %>% 
+                        mutate(realisation = v) %>% 
+                        select(-model,-ensemble,-rcp),by = c("iso","year","final_temp","realisation")) %>% 
+            mutate(total_climate_effect = rowSums(select(., ends_with("effect")))) %>% 
+            
+            mutate(SSP1_clim = SSP1_clim*(SSP1_g + total_climate_effect),
+                   SSP2_clim = SSP2_clim*(SSP2_g + total_climate_effect),
+                   SSP3_clim = SSP3_clim*(SSP3_g + total_climate_effect),
+                   SSP4_clim = SSP4_clim*(SSP4_g + total_climate_effect),
+                   SSP5_clim = SSP5_clim*(SSP5_g + total_climate_effect),
+                   year = i) %>% 
+            bind_rows(done,.) -> done
+          
+        }
+        
+        done %>% 
+          mutate(PMP_Exact = bms_coef_current$PMP_Exact,
+                 PMP_MCMC = bms_coef_current$PMP_MCMC) -> done
+        
+        
+        save(done,file = here("data","temp","projections",paste0("full_SSP_BMS",j,"_",v,".RData")))
+        rm(done,i)
+      }
+      print(paste0("BMS Prior ",j," Specific Model ",v," Finished"))
+    }
+  }
+}
+```
+

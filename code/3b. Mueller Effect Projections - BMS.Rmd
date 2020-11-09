@@ -1,0 +1,180 @@
+---
+title: "Mueller et al Projection"
+subtitle: "Bayesian Model Selection"
+author: "Moritz Schwarz and Felix Pretis"
+version: "October 2020"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+```{r,purl = FALSE}
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 10)
+```
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+library(MASS)
+
+library(extrafont)
+library(RColorBrewer)
+library(Cairo)
+library(viridis)
+
+
+rm(list = ls())
+select <- dplyr::select
+```
+
+
+<!-- **To create Server Script: Save first then** -->
+<!-- ```{r,eval= TRUE, purl = FALSE} -->
+<!-- knitr::purl(here("code","3b. Mueller Effect Projections - BMS.Rmd"),output = here("code","3b. Server_Mueller_BMS.R")) -->
+<!-- ``` -->
+
+# Load Mueller at el data
+```{r}
+mueller <- readxl::read_excel(here("data","raw","Predictive_ Distributions_by_Country.xlsx"),
+                              skip = 6,col_names = c("iso","empty1","value_2017","empty2","fifty_mean","fifty_0.05",
+                                                     "fifty_0.16","fifty_0.5","fifty_0.84","fifty_0.95", "empty3","hundred_mean","hundred_0.05",
+                                                     "hundred_0.16","hundred_0.5","hundred_0.84","hundred_0.95", "empty4","unknown")) %>% select(-contains("empty"))
+
+mueller_mean <- mueller %>% 
+  select(iso, value_2017, contains("mean"))
+
+mueller_mean %>% 
+  mutate(year = 2017,
+         gdp_cap = exp(value_2017),
+         gdp_cap_fifty = gdp_cap,
+         gdp_cap_fifty_climate = gdp_cap_fifty,
+         gdp_cap_hundred = gdp_cap,
+         gdp_cap_hundred_climate = gdp_cap_hundred,
+         fifty_mean = (fifty_mean/100)+1,
+         hundred_mean = (hundred_mean/100)+1,
+         value_2017 = NULL,
+         gdp_cap = NULL) %>% 
+  select(iso,year,gdp_cap_fifty, gdp_cap_hundred,everything()) -> mueller_df
+```
+
+## Prepare the Max GDP Restriction
+Here we identify the 2017 Level of GDP that will act as our restriction.
+```{r}
+base_gdp <- mueller_df %>% filter(year==2017) %>% 
+  select(iso,gdp_cap_fifty,gdp_cap_hundred) %>% 
+  rename(base_fifty = gdp_cap_fifty,
+         base_hundred = gdp_cap_hundred)
+
+restrict_max_gdp_int = TRUE
+```
+
+# Bayesian Model Averaging
+## Load climate data
+```{r}
+## Load climate data
+climate <- vroom(here("data","temp","corrected_anomaly_climatedata.csv"))
+```
+
+## Load BMS Coefficients
+Those are calculated in the script 1a. Estimate Models.Rmd
+```{r}
+for (j in 1:4){
+  
+  
+  read_csv(here("data","temp",paste0("BMS_Model_",j,"_coefficients.csv"))) %>% 
+    pivot_wider(id_cols = c(model,PMP_Exact,PMP_MCMC), values_from = coef,names_from = variable) %>% 
+    rename_with(.cols = -c(model,PMP_Exact,PMP_MCMC),.fn = ~paste0(tolower(.),"_coef")) -> bms_coef
+  
+  if(!nrow(bms_coef)==0){ # We need this because BMS Model 4 has no remaining coefficients
+    
+    
+    
+    ## Project (Server)
+    
+    library(doMC)
+    registerDoMC(if(nrow(bms_coef) < detectCores()){max(1,nrow(bms_coef))} else {detectCores()-1})  # nrow(bms_coef) if enough cores available - otherwise total cores-1
+    foreach(v=1:nrow(bms_coef),.packages = loadedNamespaces()) %dopar% {
+      #for (v in 1:nrow(bms_coef)){
+      print(paste0("BMS Prior ",j," Specific Model ",v))
+      
+      bms_coef %>% 
+        filter(model==v) %>% 
+        select_if(~sum(!is.na(.)) > 0) -> bms_coef_current  # select only columns that are not all NA 
+      
+      if(!nrow(bms_coef_current)==0){
+        
+        climate_vars <- bms_coef_current %>% select(-model,-PMP_Exact,-PMP_MCMC) %>% names %>% gsub("_coef","",.)
+        
+        climate %>% 
+          select(model,rcp,ensemble,final_temp,iso,year,all_of(climate_vars)) %>% 
+          drop_na -> climate_subset
+        
+        
+        # Calculate the climate effect
+        effect_BMS <- climate_subset
+        for(var in climate_vars){
+          #print(var)
+          climate_subset %>% 
+            select(all_of(var)) %>% 
+            pull %>% "*"(bms_coef_current %>% 
+                           #slice(v) %>% 
+                           select(all_of(paste0(var,"_coef"))) %>% 
+                           pull) %>%
+            as_tibble %>% 
+            rename_all(~paste0(var,"_effect"))  %>% 
+            bind_cols(effect_BMS,.) -> effect_BMS
+        }
+        
+        done <- mueller_df %>% 
+          select(-contains("fifty")) %>% 
+          filter(year==2017) %>% 
+          left_join(effect_BMS %>% 
+                      filter(year == 2017) %>% 
+                      select(-model,-ensemble,-rcp),by = c("iso","year")) %>% 
+          mutate(realisation = v) %>% 
+          relocate(c(realisation,final_temp), .after = year)
+        
+        for(i in 2018:2099){
+          #print(paste0("Realisation ",v," Year: ",i))
+          done %>% 
+            filter(year == i-1) %>% 
+            select(iso, year, realisation, final_temp,contains("hundred")) %>% 
+            # this step: 
+            left_join(effect_BMS %>% 
+                        filter(year == i-1) %>% 
+                        mutate(realisation = v) %>% 
+                        select(-model,-ensemble,-rcp),by = c("iso","year","final_temp","realisation")) %>% 
+            mutate(total_climate_effect = rowSums(select(., ends_with("effect")))) %>% 
+            mutate(#gdp_cap_fifty = gdp_cap_fifty*fifty_mean,
+              gdp_cap_hundred = gdp_cap_hundred*hundred_mean,
+              #gdp_cap_fifty_climate = gdp_cap_fifty_climate*(fifty_mean + total_climate_effect),
+              gdp_cap_hundred_climate = gdp_cap_hundred_climate*(hundred_mean + total_climate_effect),
+              year = i) %>% 
+            bind_rows(done,.) -> done
+          
+          
+        }
+        
+        done %>% 
+          mutate(PMP_Exact = bms_coef_current$PMP_Exact,
+                 PMP_MCMC = bms_coef_current$PMP_MCMC) -> done
+        
+        
+        save(done,file = here("data","temp","projections",paste0("full_Mueller_BMS",j,"_",v,".RData")))
+        rm(done,i)
+      }
+      print(paste0("BMS Prior ",j," Specific Model ",v," Finished"))
+    }
+  }
+}
+```
+
+

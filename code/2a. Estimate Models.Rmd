@@ -1,0 +1,456 @@
+---
+title: "Model Estimation"
+author: "Moritz Schwarz and Felix Pretis"
+version: "2 June 2020"
+output:
+  html_document:
+    df_print: paged
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+**October 2020:**
+This script creates the model .RData files and needs the file selection_matrix.csv as input.
+For gets, it also needs getsm_nolag_nointcp_0.05_stage2.RData as input. 
+For BMS, it also needs bm1.2.RData, bm2.2.RData, bm3.2.RData, and bm4.2.RData as input.
+For LASSO, it also needs two_stage2_x_lass_cv_nolag_nointcp.RData as input.
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+
+
+# library(extrafont)
+# library(RColorBrewer)
+# library(Cairo)
+# library(viridis)
+
+rm(list = ls())
+select <- dplyr::select
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 8, comment=NA)
+```
+
+
+This starts out with an estimated GETS file and then adds interactions. 
+```{r}
+load_getsm <- TRUE
+selection_matrix <- fread(here("data","temp","selection_matrix.csv"))
+```
+
+# BHM
+```{r}
+BHM_model <- lm(formula = dep_var ~ .-1,
+                    data = selection_matrix %>% 
+                  select(dep_var,L1.diff.ln_gdp_cap,temp,temp_2,prcp, prcp_2,contains(c("year_","iis","iso_","time_"))))
+
+#summary(BHM_model)
+```
+
+
+# GETS
+For GETS, we will load an existing file.
+```{r}
+#load all the relevant files 
+if(load_getsm){load(here("data","temp","getsm_nolag_nointcp_0.05_stage2.RData")); selection=getsm_selection_stage_2}
+```
+
+Select the right variables and define the interactions:
+```{r}
+selection_matrix %>% 
+  select(all_of(selection %>% coef %>% names)) %>% 
+  select(-L1.diff.ln_gdp_cap,-contains(c("time","year","iso","iis"))) %>% 
+  names -> selected_climate_variables
+
+
+selection_matrix %>% 
+  select(iso,year,gdp_cap,dep_var,all_of(selection %>% coef %>% names)) %>% 
+  mutate_at(.vars = vars(all_of(selected_climate_variables)),
+            .funs = list(int = ~.*selection_matrix$gdp_cap)) %>% 
+  
+  # Moving the interacted terms forward
+  select(iso, year, gdp_cap, dep_var, L1.diff.ln_gdp_cap, all_of(selected_climate_variables), 
+         ends_with("int"), everything()) -> df
+```
+
+
+Recreate the GETS result
+```{r}
+# Uncomment to compare
+# selection$coefficients
+
+standard_model<- lm(formula = dep_var ~ .-1, df %>% select(-iso,-year,-gdp_cap, -ends_with("int")))
+```
+
+Introduce Interaction for all variables
+```{r}
+#formula <- as.formula(paste0("dep_var ~ ",paste0("gdp_cap:",selected_climate_variables,collapse = " + ")," + .-1"))
+
+interaction_model_all <- lm(formula = dep_var ~ . -1, df %>% select(-iso,-year, -gdp_cap))
+```
+
+Interaction Model gets selection
+```{r, message=TRUE}
+arx(y=df$dep_var,
+    mxreg = df %>% select(-iso,-year, -gdp_cap, -dep_var) %>% as.matrix,
+    mc=F) %>% 
+  getsm(
+    object = .,
+    t.pval = 0.05,
+    ar.LjungB = NULL,
+    arch.LjungB = NULL,
+    normality.JarqueB = NULL,
+    keep = which(!names(df %>% select(-iso,-year, -gdp_cap, -dep_var)) %in% paste0(selected_climate_variables,"_int"))
+  ) -> interaction_model_gets
+
+interaction_model_selected <- lm(formula = dep_var ~ . -1, data = df %>% select(dep_var, all_of(interaction_model_gets %>% coef %>% names)))
+```
+
+## Log Interaction
+```{r, message=TRUE,eval=TRUE}
+selection_matrix %>% 
+  select(iso,year,gdp_cap,dep_var,all_of(selection %>% coef %>% names)) %>% 
+  mutate_at(.vars = vars(all_of(selected_climate_variables)),
+            .funs = list(int = ~.*log(selection_matrix$gdp_cap))) %>% 
+  
+  # Moving the interacted terms forward
+  select(iso, year, gdp_cap, dep_var, 
+         L1.diff.ln_gdp_cap, all_of(selected_climate_variables), 
+         ends_with("int"), everything()) -> df
+
+interaction_model_all_log <- lm(formula = dep_var ~ . -1, df %>% select(-iso,-year, -gdp_cap))
+```
+
+## Log Interaction Selection
+```{r, message=TRUE,eval=TRUE}
+arx(y=df$dep_var,
+    mxreg = df %>% select(-iso,-year, -gdp_cap, -dep_var) %>% as.matrix,
+    mc=F) %>% 
+  getsm(
+    object = .,
+    t.pval = 0.05,
+    ar.LjungB = NULL,
+    arch.LjungB = NULL,
+    normality.JarqueB = NULL,
+    keep = which(!names(df %>% select(-iso,-year, -gdp_cap, -dep_var)) %in% paste0(selected_climate_variables,"_int"))
+  ) -> interaction_model_gets
+
+interaction_model_selected_log <- lm(formula = dep_var ~ . -1, data = df %>% select(dep_var, all_of(interaction_model_gets %>% coef %>% names)))
+```
+
+## First
+
+```{r}
+selection_matrix %>% 
+  select(year,dep_var,all_of(selection %>% coef %>% names)) %>% 
+  filter(year %in% c(min(year):(min(year)+30))) %>% 
+  select(-year) -> first_df
+  
+
+first_model <- lm(dep_var ~ .-1,first_df)
+drop <- names(coefficients(first_model))[which(is.na(coefficients(first_model)))] #checks which coefficients are na in the above regression
+
+first_model <- lm(dep_var ~ .-1,first_df %>% select(-all_of(drop)))
+```
+
+
+## Last
+```{r}
+selection_matrix %>% 
+  select(year,dep_var,all_of(selection %>% coef %>% names)) %>% 
+  filter(year %in% c((max(year)-30):(max(year)))) %>% 
+  select(-year) -> last_df
+  
+last_model <- lm(dep_var ~ .-1,last_df)
+drop <- names(coefficients(last_model))[which(is.na(coefficients(last_model)))] #checks which coefficients are na in the
+last_model <- lm(dep_var ~ .-1,last_df %>% select(-all_of(drop)))
+```
+
+
+# LASSO
+```{r}
+load_lasso <- TRUE
+```
+
+## Standard
+```{r}
+if(load_lasso){
+  load(here("data/temp/two_stage2_x_lass_cv_nolag_nointcp.RData"))
+  x_lass_cv = x_lass_cv_2}
+
+lasso_formula <- as.formula(paste0("dep_var ~ ",paste0(x_lass_cv,collapse = " + "),"-1"))
+
+lasso_standard_model <- lm(formula = lasso_formula, selection_matrix)
+
+```
+
+## Prepare interaction
+```{r}
+selection_matrix %>% 
+  select(all_of(x_lass_cv)) %>% 
+  select(-L1.diff.ln_gdp_cap,-contains(c("time","year","iso","iis"))) %>% 
+  names -> selected_climate_variables
+
+
+selection_matrix %>% 
+  select(iso,year,gdp_cap,dep_var,all_of(x_lass_cv)) %>% 
+  mutate_at(.vars = vars(all_of(selected_climate_variables)),
+            .funs = list(int = ~.*selection_matrix$gdp_cap)) %>% 
+  
+  # Moving the interacted terms forward
+  select(iso, year, gdp_cap, dep_var, L1.diff.ln_gdp_cap, all_of(selected_climate_variables), 
+         ends_with("int"), everything()) -> df
+```
+
+
+## Non-Log Interaction (not used)
+Introduce Interaction for all variables
+```{r, eval=F}
+#formula <- as.formula(paste0("dep_var ~ ",paste0("gdp_cap:",selected_climate_variables,collapse = " + ")," + .-1"))
+
+lasso_interaction_model_all <- lm(formula = dep_var ~ . -1, df %>% select(-iso,-year, -gdp_cap))
+```
+
+Interaction Model gets selection
+```{r, message=TRUE, eval=F}
+arx(y=df$dep_var,
+    mxreg = df %>% select(-iso,-year, -gdp_cap, -dep_var) %>% as.matrix,
+    mc=F) %>% 
+  getsm(
+    object = .,
+    t.pval = 0.05,
+    ar.LjungB = NULL,
+    arch.LjungB = NULL,
+    normality.JarqueB = NULL,
+    keep = which(!names(df %>% select(-iso,-year, -gdp_cap, -dep_var)) %in% paste0(selected_climate_variables,"_int"))
+  ) -> interaction_model_lasso
+
+lasso_interaction_model_selected <- lm(formula = dep_var ~ . -1, data = df %>% select(dep_var, all_of(interaction_model_lasso %>% coef %>% names)))
+```
+
+## Log Interaction
+```{r, message=TRUE,eval=TRUE}
+selection_matrix %>% 
+  select(iso,year,gdp_cap,dep_var,all_of(x_lass_cv)) %>% 
+  mutate_at(.vars = vars(all_of(selected_climate_variables)),
+            .funs = list(int = ~.*log(selection_matrix$gdp_cap))) %>% 
+  
+  # Moving the interacted terms forward
+  select(iso, year, gdp_cap, dep_var, 
+         L1.diff.ln_gdp_cap, all_of(selected_climate_variables), 
+         ends_with("int"), everything()) -> df
+
+lasso_interaction_model_all_log <- lm(formula = dep_var ~ . -1, df %>% select(-iso,-year, -gdp_cap))
+```
+
+## Log Interaction Selection
+```{r, message=TRUE,eval=TRUE}
+arx(y=df$dep_var,
+    mxreg = df %>% select(-iso,-year, -gdp_cap, -dep_var) %>% as.matrix,
+    mc=F) %>% 
+  getsm(
+    object = .,
+    t.pval = 0.05,
+    ar.LjungB = NULL,
+    arch.LjungB = NULL,
+    normality.JarqueB = NULL,
+    keep = which(!names(df %>% select(-iso,-year, -gdp_cap, -dep_var)) %in% paste0(selected_climate_variables,"_int"))
+  ) -> interaction_model_lasso
+
+lasso_interaction_model_selected_log <- lm(formula = dep_var ~ . -1, data = df %>% select(dep_var, all_of(interaction_model_lasso %>% coef %>% names)))
+```
+
+## First
+
+```{r}
+selection_matrix %>% 
+  select(year,dep_var,all_of(x_lass_cv)) %>% 
+  filter(year %in% c(min(year):(min(year)+30))) %>% 
+  select(-year) -> first_df
+  
+
+lasso_first_model <- lm(dep_var ~ .-1,first_df)
+drop <- names(coefficients(lasso_first_model))[which(is.na(coefficients(lasso_first_model)))] #checks which coefficients are na in the above regression
+
+lasso_first_model <- lm(dep_var ~ .-1,first_df %>% select(-all_of(drop)))
+```
+
+
+## Last
+```{r}
+selection_matrix %>% 
+  select(year,dep_var,all_of(x_lass_cv)) %>% 
+  filter(year %in% c((max(year)-30):(max(year)))) %>% 
+  select(-year) -> last_df
+  
+lasso_last_model <- lm(dep_var ~ .-1,last_df)
+drop <- names(coefficients(lasso_last_model))[which(is.na(coefficients(lasso_last_model)))] #checks which coefficients are na in the
+lasso_last_model <- lm(dep_var ~ .-1,last_df %>% select(-all_of(drop)))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+# Bayesian Model Selection
+
+# Display Models
+```{r, results="asis", echo=FALSE,out.width=10, eval=F}
+
+load(here("data","temp","standard_gets_model.RData"))
+load(here("data","temp","standard_LASSO_model.RData"))
+load(here("data","temp","standard_gets_model.RData"))
+load(here("data","temp","standard_gets_model.RData"))
+
+
+load(here("data","temp","first_gets_model.RData"))
+load(here("data","temp","last_gets_model.RData"))
+
+load(here("data","temp","interaction_model_all.RData"))
+load(here("data","temp","interaction_model_selected.RData"))
+load(here("data","temp","log_interaction_model_all.RData"))
+load(here("data","temp","log_interaction_model_selected.RData"))
+
+load(here("data","temp","standard_lasso_model.RData"))
+load(here("data","temp","BHM_model.RData"))
+
+
+
+stargazer::stargazer(standard_model,
+                     first_model,
+                     last_model,
+                     interaction_model_all, 
+                     interaction_model_selected, 
+                     interaction_model_all_log,
+                     interaction_model_selected_log,
+                     lasso_standard_model,
+                     BHM_model,
+                     type = "text",
+                     digits = 6,
+                     column.labels = c("Standard","Interaction All","Interaction Selected",
+                                       "Interaction All Log","Interaction Selected Log"),
+                     omit = c("iis|time|year|iso"))
+```
+
+
+
+
+
+# Save Models
+```{r}
+save(standard_model,file = here("data","temp","standard_gets_model.RData"))
+save(first_model,file = here("data","temp","first_gets_model.RData"))
+save(last_model,file = here("data","temp","last_gets_model.RData"))
+
+save(interaction_model_all,file = here("data","temp","interaction_model_all.RData"))
+save(interaction_model_selected,file = here("data","temp","interaction_model_selected.RData"))
+save(interaction_model_all_log,file = here("data","temp","log_interaction_model_all.RData"))
+save(interaction_model_selected_log,file = here("data","temp","log_interaction_model_selected.RData"))
+
+
+save(lasso_standard_model,file = here("data","temp","standard_lasso_model.RData"))
+save(lasso_interaction_model_all_log,file = here("data","temp","lasso_log_interaction_model_all.RData"))
+save(lasso_interaction_model_selected_log,file = here("data","temp","lasso_log_interaction_model_selected.RData"))
+save(lasso_first_model,file = here("data","temp","first_lasso_model.RData"))
+save(lasso_last_model,file = here("data","temp","last_lasso_model.RData"))
+
+
+
+save(BHM_model,file = here("data","temp","BHM_model.RData"))
+```
+
+
+
+
+# BMS Models
+
+1. uniform
+2. fixed
+3. pip
+4. random
+
+```{r}
+library(BMS)
+```
+
+## Load selection matrix
+```{r}
+selection_matrix <- read_csv(here("data","temp","selection_matrix.csv"))
+```
+
+
+### Create Coefficient Dataframe
+
+```{r}
+load(here("data","use","BMS","two-step","bm1.2.RData"))
+load(here("data","use","BMS","two-step","bm2.2.RData"))
+load(here("data","use","BMS","two-step","bm3.2.RData"))
+load(here("data","use","BMS","two-step","bm4.2.RData"))
+
+for(i in 1:4){
+  if(i==1){relevant_bm <- bm1.2}
+  if(i==2){relevant_bm <- bm2.2}
+  if(i==3){relevant_bm <- bm3.2}
+  if(i==4){relevant_bm <- bm4.2}
+  
+  relevant_bm %>% 
+    beta.draws.bma() %>% 
+    data.frame(variable = row.names(.),.) %>% 
+    as_tibble() %>% 
+    setNames(c("variable",paste0("m_",1:(ncol(.)-1)))) -> bm_coefs
+  
+  relevant_bm %>% 
+    topmodels.bma() %>% 
+    data.frame(variable = row.names(.),.) %>% 
+    as_tibble() %>% 
+    setNames(c("variable",paste0("m_",1:(ncol(.)-1)))) -> topmod_bm
+  
+  
+  take_BMS_coef <- FALSE
+  if (take_BMS_coef) {
+    topmod_bm <- topmod_bm[c((nrow(topmod_bm) - 1):nrow(topmod_bm)), ] # get the two last rows
+    bm_coefs <- rbind(bm_coefs, topmod_bm) # attach them to the beta.draws data.frame
+  }
+  
+  bm_overall <- tibble()
+  for(k in 1:(ncol(bm_coefs)-1)){
+    print(k)
+    if(!take_BMS_coef){
+      selection_matrix %>% 
+        select(all_of(c("dep_var",topmod_bm %>% 
+                          select(variable,all_of(paste0("m_",k))) %>% 
+                          filter(!!as.symbol(paste0("m_",k)) == 1) %>% # filter out all variables that are included in the model
+                          filter(!variable %in% c("PMP (Exact)","PMP (MCMC)")) %>% 
+                          pull(variable)))) -> mat_bms
+      
+      
+      arx(y = mat_bms %>% select(dep_var) %>% pull,
+          mxreg =  mat_bms %>% select(-dep_var) %>% as.matrix, 
+          mc=F) %>% 
+        
+        coef %>% 
+        
+        data.frame(variable = names(.),coef = ., row.names = NULL) %>% 
+        
+        filter(!grepl("iis|L1.diff.ln_gdp_cap|iso_|year_|time_",variable))  %>% 
+        
+        mutate(model = k,
+               PMP_Exact = topmod_bm %>% select(variable, all_of(paste0("m_", k))) %>% filter(variable == "PMP (Exact)") %>% pull,
+               PMP_MCMC = topmod_bm %>% select(variable, all_of(paste0("m_", k))) %>% filter(variable == "PMP (MCMC)") %>% pull) %>% 
+        relocate(model) %>% 
+        
+        bind_rows(bm_overall,.) -> bm_overall
+    }
+  }
+  write_csv(bm_overall,here("data","temp",paste0("BMS_Model_",i,"_coefficients.csv")))
+}
+
+```

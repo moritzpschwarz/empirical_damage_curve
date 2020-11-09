@@ -1,0 +1,183 @@
+---
+title: "Aggregate Effect Projections into specific files"
+author: "Moritz Schwarz and Felix Pretis"
+version: "October 2020"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+```{r,purl = FALSE}
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 10)
+```
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+library(MASS)
+
+library(extrafont)
+library(RColorBrewer)
+library(Cairo)
+library(viridis)
+
+rm(list = ls())
+select <- dplyr::select
+```
+
+
+**To create Server Script: Save first then**
+```{r,eval= TRUE, purl = FALSE}
+knitr::purl(here::here("code","5. Aggregate Effect Projections.Rmd"),output = here("code","6. Server_MassiveAnalysis.R"))
+```
+
+
+## Full Analysis (Server)
+Here we use several million observations
+```{r}
+SSP_wide <- vroom(file=here("data","raw","SspDb_country_data_2013-06-12.csv"))
+
+SSP_wide %>% 
+  filter(MODEL == "OECD Env-Growth") %>% 
+  filter(VARIABLE %in% c("Population","GDP|PPP")) %>% 
+  pivot_longer(cols = -c(MODEL,SCENARIO,REGION,VARIABLE,UNIT),names_to = "YEAR") %>% 
+  mutate(YEAR = YEAR %>% as.character %>% as.integer) %>% 
+  pivot_wider(id_cols = c(MODEL,SCENARIO,REGION,YEAR),names_from = VARIABLE) %>% 
+  
+  mutate(GDP = `GDP|PPP`*1000000000,
+         `GDP|PPP`=NULL,
+         POPULATION = `Population`*1000000,
+         `Population`=NULL,
+         GDP_pc = GDP/POPULATION,
+         MODEL = NULL,
+         SCENARIO = gsub("_v9_130325","",SCENARIO)) %>% 
+  
+  filter(!YEAR == 2000) %>% 
+  drop_na -> ssp
+
+ssp %>% 
+  select(REGION) %>% 
+  unique %>% 
+  slice(rep(1:n(), each = 90)) %>%
+  group_by(REGION) %>% 
+  mutate(YEAR = 1:90) %>% 
+  ungroup() %>% 
+  mutate(YEAR = YEAR + 2009) %>% 
+  full_join(ssp %>% 
+              select(-GDP,-POPULATION) %>% 
+              filter(YEAR >2005) %>% 
+              pivot_wider(id_cols = c(REGION,YEAR),values_from = "GDP_pc",names_from = "SCENARIO"),by=c("REGION","YEAR")) %>% 
+  group_by(REGION) %>% 
+  mutate(SSP1 = zoo::na.spline(SSP1,YEAR),
+         SSP2 = zoo::na.spline(SSP2,YEAR),
+         SSP3 = zoo::na.spline(SSP3,YEAR),
+         SSP4 = zoo::na.spline(SSP4,YEAR),
+         SSP5 = zoo::na.spline(SSP5,YEAR)) %>% 
+  ungroup %>% 
+  rename(iso = REGION,
+         year = YEAR) -> ssp
+```
+
+
+```{r}
+socio <- c("SSP","Mueller")
+model<- c(
+  "gets",
+  "firstgets",
+  "lastgets",
+  "firstlasso",
+  "lastlasso",
+  "BMS1",
+  "BMS2",
+  "BMS3",
+  "lasso_interaction_log_selected_altrestr1",
+  "lasso_interaction_log_selected_altrestr2",
+  "lasso_interaction_log_selected_restricted",
+  "interaction_log_selected_altrestr1",
+  "interaction_log_selected_altrestr2",
+  "interaction_log_selected_restricted",
+  "interaction_log_selected_unrestricted",
+  "LASSO",
+  "BHM"
+)
+for(i in socio){
+  for(j in model){
+    #i = "SSP"
+    #j = "gets"
+    
+    print(paste("full",i,j,sep="_"))
+    print(length(list.files(here("data","temp","projections"),pattern = paste("full",i,j,sep="_"))))
+    
+    
+    # Carry out the merging of the files
+    indv_files <- list.files(here("data","temp","projections"),pattern = paste("full",i,j,sep="_"),full.names = TRUE)
+    
+    massive_overall <- tibble()
+    for(k in seq_along(indv_files)){
+      
+      load(indv_files[k])
+      
+      
+      if(i == "Mueller"){
+        done %>%
+          filter(year > 2089) %>%
+          
+          {if (grepl("BMS", j)) {
+            select(.,iso,year,realisation,final_temp,gdp_cap_hundred,gdp_cap_hundred_climate,PMP_Exact,PMP_MCMC)
+          } else{
+            select(.,iso,year,realisation,final_temp,gdp_cap_hundred,gdp_cap_hundred_climate)
+          }} %>%
+          
+          mutate(diff = gdp_cap_hundred_climate / gdp_cap_hundred) %>% 
+          drop_na %>% 
+          
+          {if(grepl("BMS",j)){group_by(.,iso,final_temp,realisation,PMP_MCMC,PMP_Exact)}else{group_by(.,iso,final_temp,realisation)}} %>%
+          
+          summarise(diff = mean(diff),.groups =  "drop") %>%
+          ungroup %>%
+          bind_rows(massive_overall,.) -> massive_overall
+      } else if(i == "SSP"){
+        done %>%
+          left_join(ssp,by=c("iso","year")) %>%
+          mutate(diff_SSP1 = SSP1_clim / SSP1,
+                 diff_SSP2 = SSP2_clim / SSP2,
+                 diff_SSP3 = SSP3_clim / SSP3,
+                 diff_SSP4 = SSP4_clim / SSP4,
+                 diff_SSP5 = SSP5_clim / SSP5) %>%
+          filter(year > 2089) %>%
+          
+          {if (grepl("BMS", j)) {
+            select(.,iso,year,realisation,final_temp,starts_with("diff_SSP"),PMP_Exact,PMP_MCMC)
+          } else{
+            select(.,iso,year,realisation,final_temp,starts_with("diff_SSP"))
+          }} %>%
+          
+          drop_na %>%
+          
+          {if(grepl("BMS",j)){
+            group_by(.,iso,final_temp,realisation,PMP_MCMC,PMP_Exact) } else {
+              group_by(.,iso,realisation,final_temp)
+            }} %>%
+          summarise(diff_SSP1 = mean(diff_SSP1),
+                    diff_SSP2 = mean(diff_SSP2),
+                    diff_SSP3 = mean(diff_SSP3),
+                    diff_SSP4 = mean(diff_SSP4),
+                    diff_SSP5 = mean(diff_SSP5),.groups="drop") %>%
+          ungroup %>%
+          bind_rows(massive_overall,.) -> massive_overall
+      }
+      rm(done)
+    }
+    save(massive_overall, file=here("data","out",paste0(i,"_",j,"_massive_EOC.RData")))
+  }
+}
+```
+

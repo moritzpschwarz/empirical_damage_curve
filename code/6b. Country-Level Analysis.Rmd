@@ -1,0 +1,624 @@
+---
+title: "Country-Level Analysis"
+author: "Moritz Schwarz and Felix Pretis"
+version: "October 2020"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+```{r,purl = FALSE}
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 10)
+```
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+library(MASS)
+
+library(quantreg)
+
+library(extrafont)
+library(RColorBrewer)
+library(Cairo)
+library(viridis)
+
+library(cowplot)
+library(ggalt)
+library(ggnewscale)
+
+
+rm(list = ls())
+select <- dplyr::select
+```
+
+What do I need for each country: 
+
+- The 66%, 90% and 95% span for each country (rq regression)
+- The Mean and the Median (rq regression)
+- The marginal step (based on the rq regression)
+
+
+# Calculate all Quantiles
+```{r}
+for(cubic in c(FALSE,TRUE)){
+  files  <- list.files(here("data","out"),pattern = "EOC",full.names = T)
+  #files <- grep("BMS",files,value=T,ignore.case = FALSE)
+  
+  overall_df <- tibble()
+  for(i in 1:length(files)){
+    #for(i in c(6,18)){
+    print(list.files(here("data", "out"), pattern = "EOC")[i])
+    load(files[i])
+    
+    tibble(name = gsub("_massive_EOC", "",
+                       gsub(".RData", "", list.files(here("data", "out"), pattern = "EOC")[i], fixed = T))) %>%
+      mutate(name = case_when(name=="Mueller_interaction_log_selected_restricted"~"Mueller_gets_RestrAdapt",
+                              name=="Mueller_interaction_log_selected_unrestricted"~"Mueller_gets_URestrAdapt",
+                              name=="Mueller_interaction_log_selected_altrestr1"~"Mueller_gets_AltRestr1",
+                              name=="Mueller_interaction_log_selected_altrestr2"~"Mueller_gets_AltRestr2",
+                              name=="Mueller_lasso_interaction_log_selected_altrestr1"~"Mueller_lasso_AltRestr1",
+                              name=="Mueller_lasso_interaction_log_selected_altrestr2"~"Mueller_lasso_AltRestr2",
+                              
+                              name=="SSP_interaction_log_selected_restricted"~"SSP_gets_RestrAdapt",
+                              name=="SSP_interaction_log_selected_unrestricted"~"SSP_gets_URestrAdapt",
+                              name=="SSP_interaction_log_selected_altrestr1"~"SSP_gets_AltRestr1",
+                              name=="SSP_interaction_log_selected_altrestr2"~"SSP_gets_AltRestr2",
+                              name=="SSP_lasso_interaction_log_selected_altrestr1"~"SSP_lasso_AltRestr1",
+                              name=="SSP_lasso_interaction_log_selected_altrestr2"~"SSP_lasso_AltRestr2",
+                              TRUE~name)) %>% 
+      separate(name, sep = "_", into = c("baseline", "model","spec"),fill = "right") -> name_df
+    
+    baseline <- name_df$baseline
+    model <- name_df$model
+    specification <- ifelse(is.na(name_df$spec),"standard",name_df$spec)
+    
+    
+    if(model=="firstgets"){
+      model <- "gets"
+      specification <- "first"
+    }
+    if(model=="lastgets"){
+      model <- "gets"
+      specification <- "last"
+    }
+    if(model=="firstlasso"){
+      model <- "lasso"
+      specification <- "first"
+    }
+    if(model=="lastlasso"){
+      model <- "lasso"
+      specification <- "last"
+    }
+    
+    #success <- FALSE
+    massive_overall %>% distinct(final_temp) -> temperature_axis
+    
+    
+    
+    if(baseline == "Mueller"){
+      
+      
+      if(grepl("BMS",files[i])){
+        massive_overall %>% 
+          group_by(iso,final_temp) %>% 
+          summarise(diff = weighted.mean(diff,PMP_Exact),.groups="drop") -> massive_overall
+      }
+      form <- "diff ~ final_temp + I(final_temp*final_temp)"
+      if(cubic){form <- paste0(form," + I(final_temp*final_temp*final_temp)")}
+      form <- as.formula(form)
+      
+      
+      
+      for(country in unique(massive_overall$iso)){
+        success <- FALSE
+        while (!success) {
+          try({
+            print(country)
+            intermed <- massive_overall %>% filter(iso==country)
+            
+            vlow <- rq(formula = form, data = intermed,method = "pfn",tau = 0.025)
+            low <- rq(formula = form, data = intermed,method = "pfn",tau = 0.05)
+            midl <- rq(formula = form, data = intermed,method = "pfn",tau = 0.25)
+            med <- rq(formula = form, data = intermed,method = "pfn",tau = 0.5)
+            midh <- rq(formula = form, data = intermed,method = "pfn",tau = 0.75)
+            high <- rq(formula = form, data = intermed,method = "pfn",tau = 0.95)
+            vhigh <- rq(formula = form, data = intermed,method = "pfn",tau = 0.975)
+            
+            
+            tibble(
+              final_temp = temperature_axis$final_temp,
+              baseline = baseline,
+              model = model,
+              specification = specification,
+              scenario = "Hundred",
+              iso = country,
+              vlow  = predict(vlow, newdata = temperature_axis),
+              low  =  predict(low, newdata = temperature_axis),
+              midl  = predict(midl, newdata = temperature_axis),
+              med  =  predict(med, newdata = temperature_axis),
+              midh  = predict(midh, newdata = temperature_axis),
+              high  = predict(high, newdata = temperature_axis),
+              vhigh = predict(vhigh, newdata = temperature_axis)
+            ) %>% 
+              bind_rows(overall_df, .) -> overall_df
+            success <- TRUE
+          },silent = FALSE)
+        }
+      }
+      
+      
+    } else if (baseline == "SSP") {
+      
+      if(grepl("BMS",files[i])){
+        massive_overall %>% 
+          group_by(iso,final_temp) %>% 
+          summarise(diff_SSP1 = weighted.mean(diff_SSP1,PMP_Exact),
+                    diff_SSP2 = weighted.mean(diff_SSP2,PMP_Exact),
+                    diff_SSP3 = weighted.mean(diff_SSP3,PMP_Exact),
+                    diff_SSP4 = weighted.mean(diff_SSP4,PMP_Exact),
+                    diff_SSP5 = weighted.mean(diff_SSP5,PMP_Exact),.groups="drop") -> massive_overall
+      }
+      
+      for (scen in 1:5){
+        print(paste0("SSP ",scen))
+        
+        for(country in unique(massive_overall$iso)){
+          print(country)
+          success <- FALSE
+          intermed <- massive_overall %>% filter(iso==country)
+          while(!success){
+            try({
+              form <- paste0("diff_SSP",scen," ~ final_temp + I(final_temp*final_temp)")
+              if(cubic){form <- paste0(form," + I(final_temp*final_temp*final_temp)")}
+              form <- as.formula(form)
+              
+              vlow <- rq(formula = form, data = intermed,method = "pfn",tau = 0.025)
+              low <- rq(formula = form, data = intermed,method = "pfn",tau = 0.05)
+              midl <- rq(formula = form, data = intermed,method = "pfn",tau = 0.25)
+              med <- rq(formula = form, data = intermed,method = "pfn",tau = 0.5)
+              midh <- rq(formula = form, data = intermed,method = "pfn",tau = 0.75)
+              high <- rq(formula = form, data = intermed,method = "pfn",tau = 0.95)
+              vhigh <- rq(formula = form, data = intermed,method = "pfn",tau = 0.975)
+              
+              
+              tibble(
+                final_temp = temperature_axis$final_temp,
+                baseline = baseline,
+                model = model,
+                specification = specification,
+                scenario = as.character(scen),
+                iso=country,
+                vlow  = predict(vlow, newdata = temperature_axis),
+                low  =  predict(low, newdata = temperature_axis),
+                midl  = predict(midl, newdata = temperature_axis),
+                med  =  predict(med, newdata = temperature_axis),
+                midh  = predict(midh, newdata = temperature_axis),
+                high  = predict(high, newdata = temperature_axis),
+                vhigh = predict(vhigh, newdata = temperature_axis)
+              ) %>%
+                bind_rows(overall_df, .) -> overall_df
+              
+              success <- TRUE
+              
+            },silent = FALSE)
+          }
+        }
+      }
+    }
+    rm(vlow,low,midh,midl,med,high,vhigh)
+  }
+  
+  overall_df %>% 
+    arrange(baseline,model,specification,scenario,final_temp) -> overall_df
+  
+  write_csv(overall_df,here("data","out",paste0("all_models_iso_quantiles_",if(cubic){"cub"}else{"sq"},".csv")))
+}
+
+```
+
+
+
+# Load data
+
+```{r}
+overall_df <- vroom(here("data","out","all_models_iso_quantiles_sq.csv"))
+```
+
+Renaming and preparing
+```{r}
+overall_df %>% 
+  mutate(baseline = case_when(baseline=="Mueller"~"MSW",
+                              TRUE~baseline)) %>% 
+  mutate(across(c(where(is.double),-final_temp),~.-1)) %>% 
+  rename(pc.025 = vlow,
+         pc.05 = low,
+         pc.25 = midl,
+         pc.5 = med,
+         pc.75 = midh,
+         pc.95 = high,
+         pc.975 = vhigh) -> df
+```
+
+Significance levels for all country estimates
+```{r, eval=FALSE}
+df %>% 
+  mutate(sig.50 = ifelse(sign(pc.75)==sign(pc.25),1,0),
+         sig.90 = ifelse(sign(pc.95)==sign(pc.05),1,0),
+         sig.95 = ifelse(sign(pc.975)==sign(pc.025),1,0)) -> significance_all
+```
+
+figure out in which map the value is showing up (Map Position)
+```{r}
+df %>% 
+  mutate(map_position = round(final_temp),
+         map_position = ifelse(final_temp < 1.75,1,map_position)) %>% 
+  
+  # average over the map position
+  group_by(baseline,model,specification,scenario,map_position,iso) %>% 
+  summarise(across(where(is.numeric),.fns = mean),.groups = "drop") %>% 
+  mutate(sig.50 = ifelse(sign(pc.75)==sign(pc.25),1,0),
+         sig.90 = ifelse(sign(pc.95)==sign(pc.05),1,0),
+         sig.95 = ifelse(sign(pc.975)==sign(pc.025),1,0)) %>% 
+  select(-starts_with("pc."),pc.5) %>% 
+  
+  # Joining on the iso codes
+  mutate(region = countrycode::countrycode(sourcevar = iso,origin = "iso3c",destination = "country.name")) %>% 
+  relocate(region, .after = iso) %>% 
+  mutate(region = case_when(region=="Myanmar (Burma)"~"Myanmar",
+                            region=="Bosnia & Herzegovina"~"Bosnia and Herzegovina",
+                            region=="Congo - Brazzaville"~"Republic of Congo",
+                            region=="Congo - Kinshasa"~"Democratic Republic of the Congo",
+                            TRUE~region)) -> map_values
+```
+
+
+```{r}
+map_data("world") %>% 
+  filter(!region=="Antarctica") %>% 
+  mutate(region = case_when(region=="USA"~"United States",
+                            region=="UK"~"United Kingdom",
+                            region=="Czech Republic"~"Czechia",
+                            region=="Ivory Coast"~"Côte d’Ivoire",
+                            TRUE~region)) -> world_df
+
+```
+
+
+# Maps
+
+## Manual: gets and LASSO combined 
+
+Main Figure for PNAS Submission Oct 2020
+<2°C 
+3.5°C 
+4.5°C
+
+```{r}
+world_df %>% 
+  full_join(df %>% 
+              mutate(map_position = NA,
+                     map_position = case_when(final_temp < 2~"Below 2°C",
+                                              final_temp>=3&final_temp<4~"3.5°C",
+                                              final_temp>=4.5~">4.5°C")) %>% 
+              
+              # average over the map position
+              group_by(baseline,model,specification,scenario,map_position,iso) %>% 
+              summarise(across(where(is.numeric),.fns = mean),.groups = "drop") %>% 
+              mutate(sig.50 = ifelse(sign(pc.75)==sign(pc.25),1,0),
+                     sig.90 = ifelse(sign(pc.95)==sign(pc.05),1,0),
+                     sig.95 = ifelse(sign(pc.975)==sign(pc.025),1,0)) %>% 
+              select(-starts_with("pc."),pc.5) %>% 
+              
+              # Joining on the iso codes
+              mutate(region = countrycode::countrycode(sourcevar = iso,origin = "iso3c",destination = "country.name")) %>% 
+              relocate(region, .after = iso) %>% 
+              mutate(region = case_when(region=="Myanmar (Burma)"~"Myanmar",
+                                        region=="Bosnia & Herzegovina"~"Bosnia and Herzegovina",
+                                        region=="Congo - Brazzaville"~"Republic of Congo",
+                                        region=="Congo - Kinshasa"~"Democratic Republic of the Congo",
+                                        TRUE~region))  %>%
+              filter(baseline=="MSW",
+                     specification=="standard",
+                     model %in% c("LASSO","gets")),by="region") %>% 
+  # if 90% not significant, then NA
+  mutate(pc.5 = ifelse(sig.90 != 1, NA, pc.5)) -> intermed
+
+intermed %>% 
+  filter(!is.na(map_position)) %>% 
+  mutate(map_position = factor(map_position,levels = c("Below 2°C","3.5°C",">4.5°C"))) %>% 
+  ggplot() +
+  facet_grid(map_position~model)+
+  geom_polygon(aes(x=long,y=lat,group=group),fill="grey",inherit.aes = FALSE,data = world_df)+
+  geom_polygon(aes(x=long,y=lat,group=group,fill=pc.5)) +
+  coord_proj("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs") +
+  
+  
+  #coord_quickmap()+
+  scale_fill_gradientn(colours = brewer.pal(name = "RdBu",n=11), 
+                       breaks = seq(from = -1, to = 1, by = 0.2),
+                       guide = guide_colourbar(title = "Level Percentage Difference to baseline",
+                                               title.position = "top"),
+                       labels=c(as.character(scales::percent(seq(from = -1, to = 0.8, by = 0.2))),">100%"),
+                       limits=c(-1,1),
+                       oob=scales::squish,
+                       na.value = "grey") +
+  labs(x=NULL,y=NULL)+
+  
+  theme(legend.position = "bottom",
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "grey",fill=NA),
+        text = element_text(family = "Georgia"),
+        axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        legend.key.size = unit(0.25, "cm"),
+        legend.key.width = unit(1.5,"cm"),
+        legend.text = element_text(family = "Georgia",size=8)) +
+        ggsave(filename = here("output","figures","Map_MSW_getsLASSO_standard.jpg"),height = 6,width = 6)
+
+
+```
+
+
+
+## Loop
+
+```{r}
+set_null_device("png")
+for(m in unique(map_values$baseline)){
+  if(is.na(m)){next}
+  for(k in unique(map_values$scenario)){
+    if(is.na(k)){next}
+    if(m=="MSW"&k %in% c(1:5)){next}
+    if(m=="SSP"& k == "Hundred"){next}
+    for(j in unique(map_values$specification)){
+      if(is.na(j)){next}
+      
+      world_df %>% 
+        full_join(map_values %>% 
+                    filter(baseline==m,
+                           scenario==k,
+                           specification==j),by="region") %>% 
+        # if 90% not significant, then NA
+        mutate(pc.5 = ifelse(sig.90 != 1, NA, pc.5)) -> intermed
+      
+      
+      
+      for(n in unique(intermed$model)){
+        if(is.na(n)){next}
+        for(i in unique(map_values$map_position)){
+          if(is.na(i)){next}
+          
+          
+          
+          print(paste(m,k,j,i,n,sep=" "))
+          
+          intermed %>% 
+            filter(model==n|is.na(model)) %>% 
+            
+            filter(map_position==i|is.na(map_position)) %>% 
+            
+            ggplot() +
+            #geom_polygon(data = map_data("world") %>%  filter(region !="Antarctica"),
+            #             aes(x=long,y=lat,group=group),fill="white",color="black",inherit.aes = FALSE,size=0.1)+
+            geom_polygon(aes(x=long,y=lat,group=group,fill=pc.5)) +
+            coord_proj("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs") +
+            
+            #facet_wrap(~map_position)+
+            #coord_quickmap()+
+            scale_fill_gradientn(colours = brewer.pal(name = "RdBu",n=11), 
+                                 breaks = seq(from = -1, to = 1, by = 0.2),
+                                 guide = guide_colourbar(title = paste0("Level Percentage Difference to Baseline (",
+                                                                        m," - ",k,")"),
+                                                         title.position = "top"),
+                                 labels=c(as.character(scales::percent(seq(from = -1, to = 0.8, by = 0.2))),">100%"),
+                                 limits=c(-1,1),
+                                 oob=scales::squish,
+                                 na.value = "grey") +
+            labs(x=NULL,y=NULL)+
+            
+            theme(legend.position = "bottom",
+                  panel.background = element_blank(),
+                  text = element_text(family = "Georgia"),
+                  axis.ticks = element_blank(),
+                  axis.text = element_blank()) -> plot
+          
+          #assign(x = paste("plot",i,j,k,m,sep = "_"),value = plot)
+          assign(x = paste("plot",i,sep = "_"),value = plot)
+          
+          # 
+          # theme(
+          #   legend.position = "bottom",
+          #   legend.key.size = unit(0.5, "cm"),
+          #   legend.key.width = unit(3,"cm"),
+          #   panel.spacing.x = unit(0.5, "lines"),
+          #   axis.title = element_blank(),
+          #   axis.text = element_blank(),
+          #   axis.ticks = element_blank(),
+          #   panel.background = element_blank(),
+          #   strip.background = element_blank(),
+          #   text = element_text(family = "Georgia"),
+          #   plot.title = element_text(size = 15, margin = margin(b = 10),hjust = 0),
+          #   plot.subtitle = element_text(size = 12, color = "darkslategrey", margin = margin(b = 25)),
+          #   plot.caption = element_text(size = 8, margin = margin(t = 10), color = "grey70", hjust = 0),
+          #   plot.background = element_blank()) 
+        }
+        
+        legend <- get_legend(plot_1 + theme(legend.box.margin = margin(0, b = 10, 0, 0),
+                                            legend.key.size = unit(0.25, "cm"),
+                                            legend.key.width = unit(1.5,"cm"),
+                                            legend.text = element_text(family = "Georgia",size=8)))
+        
+        A <- plot_grid(plotlist = list(plot_1 + theme(legend.position = "none"),
+                                       plot_2 + theme(legend.position = "none"), 
+                                       plot_3 + theme(legend.position = "none"), 
+                                       plot_4 + theme(legend.position = "none"), 
+                                       plot_5 + theme(legend.position = "none"), 
+                                       plot_6 + theme(legend.position = "none")),
+                       nrow = 3,labels = c("1.5°C","2°C","3°C","4°C","5°C","6°C"),label_fontfamily = "Georgia")
+        B <- plot_grid(A,legend,nrow=2,rel_heights = c(1,0.1))
+        ggsave(filename = here("output","figures",paste0("Map_",m,"_",k,"_",j,"_",n,".jpg")),plot = B,height = 6,width = 6)
+      }
+    }
+  }
+}
+
+
+
+# countries <- c("USA","IND","BGD","CHN","BRA","RUS")
+# ggplot(test %>% filter(sig.90==1,iso %in% countries),aes(x=final_temp,color=iso)) + 
+#   geom_line(aes(y=pc.50))
+#ggsave(plot,filename = here("output","figures",paste0("Map_",model,".pdf")),device = cairo_pdf,height=8,width = 6)
+
+```
+
+
+
+## Loop Significance
+
+```{r}
+set_null_device("png")
+for(m in unique(map_values$baseline)){
+  if(is.na(m)){next}
+  for(k in unique(map_values$scenario)){
+    if(is.na(k)){next}
+    if(m=="MSW"&k %in% c(1:5)){next}
+    if(m=="SSP"& k == "Hundred"){next}
+    for(j in unique(map_values$specification)){
+      if(is.na(j)){next}
+      
+      # m="MSW"
+      # k="Hundred"
+      # j="standard"
+      
+      
+      world_df %>% 
+        full_join(map_values %>% 
+                    filter(baseline==m,
+                           scenario==k,
+                           specification==j),by="region") %>% 
+        
+        # if 90% not significant, then NA
+        mutate(pc.5 = case_when(sig.50 == 0~"50% Range includes 0",
+                                sig.50 == 1 & sig.90 == 0 & pc.5>0~"50% Range > 0",
+                                sig.50 == 1 & sig.90 == 0 & pc.5<0~"50% Range < 0",
+                                sig.90 == 1 & sig.95== 0 & pc.5>0 ~"90% Range > 0",
+                                sig.90 == 1 & sig.95== 0 & pc.5<0 ~"90% Range < 0",
+                                sig.95 == 1 & pc.5>0 ~"95% Range > 0",
+                                sig.95 == 1 & pc.5<0 ~"95% Range < 0"),
+               
+               
+               # pc.5 = factor(pc.5,levels = c("95% Range > 0","90% Range > 0","50% Range > 0","50% Range includes 0","empty2",
+               #                               "50% Range < 0","90% Range < 0","95% Range < 0"))) -> intermed 
+               pc.5 = factor(pc.5,levels = c("95% Range > 0","90% Range > 0","50% Range > 0","50% Range includes 0",
+                                             "50% Range < 0","90% Range < 0","95% Range < 0"))) -> intermed 
+      
+      
+      
+      for(n in unique(intermed$model)){
+        if(is.na(n)){next}
+        print(paste(m,k,j,n,sep=" "))
+        for(i in unique(map_values$map_position)){
+          if(is.na(i)){next}
+          
+          # n = "gets"
+          # i = 1
+          
+          
+          
+          # cols <- rev(RColorBrewer::brewer.pal(7,"RdBu"))
+          # cols <- c(cols[1:4],"white",cols[5:7])
+          pal_rdbu <- scales::brewer_pal(palette = "RdBu")(7)
+          
+          intermed %>% 
+            filter(model==n|is.na(model)) %>% 
+            
+            filter(map_position==i|is.na(map_position)) %>% 
+            
+            ggplot() +
+            #geom_polygon(data = map_data("world") %>%  filter(region !="Antarctica"),
+            #             aes(x=long,y=lat,group=group),fill="grey",color="black",inherit.aes = FALSE,size=0.1) +
+            geom_polygon(aes(x=long,y=lat,group=group,fill=pc.5)) +
+            coord_proj("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs") +
+            
+            #new_scale_fill() +
+            
+            scale_fill_manual( name = "No Effect", breaks = c("50% Range includes 0",NA),
+                               values=c(NA,NA,NA,pal_rdbu[4],NA,NA,NA,"grey"),drop=FALSE,na.value="grey",labels = c("50% Range includes 0","No Data")) +
+            new_scale_fill() +
+            geom_polygon(aes(x=long,y=lat,group=group,fill=pc.5)) +
+            scale_fill_manual(name = "Positive Effect", breaks = c("50% Range > 0","90% Range > 0","95% Range > 0"),
+                              values=c(pal_rdbu[7:5],NA,NA,NA,NA),drop=FALSE)+
+            
+            new_scale_fill() +
+            geom_polygon(aes(x=long,y=lat,group=group,fill=pc.5)) +
+            scale_fill_manual(name = "Negative Effect", breaks = c("50% Range < 0","90% Range < 0","95% Range < 0"),
+                              values=c(NA,NA,NA,NA,pal_rdbu[3:1]),drop=FALSE) +
+            
+            theme_void()+
+            labs(x=NULL,y=NULL)+
+            
+            theme(legend.position = "bottom",
+                  legend.direction = "vertical",
+                  panel.background = element_blank(),
+                  text = element_text(family = "Georgia"),
+                  axis.ticks = element_blank(),
+                  axis.text = element_blank()) -> plot
+          
+          
+          
+          #assign(x = paste("plot",i,j,k,m,sep = "_"),value = plot)
+          assign(x = paste("plot",i,sep = "_"),value = plot)
+          
+          # 
+          # theme(
+          #   legend.position = "bottom",
+          #   legend.key.size = unit(0.5, "cm"),
+          #   legend.key.width = unit(3,"cm"),
+          #   panel.spacing.x = unit(0.5, "lines"),
+          #   axis.title = element_blank(),
+          #   axis.text = element_blank(),
+          #   axis.ticks = element_blank(),
+          #   panel.background = element_blank(),
+          #   strip.background = element_blank(),
+          #   text = element_text(family = "Georgia"),
+          #   plot.title = element_text(size = 15, margin = margin(b = 10),hjust = 0),
+          #   plot.subtitle = element_text(size = 12, color = "darkslategrey", margin = margin(b = 25)),
+          #   plot.caption = element_text(size = 8, margin = margin(t = 10), color = "grey70", hjust = 0),
+          #   plot.background = element_blank()) 
+        }
+        
+        legend <- get_legend(plot_1 + theme(legend.text = element_text(family = "Georgia",size=8),
+                                            legend.box.margin = margin(0, b = 10, 0, 0)))
+        
+        A <- plot_grid(plotlist = list(plot_1 + theme(legend.position = "none"),
+                                       plot_2 + theme(legend.position = "none"), 
+                                       plot_3 + theme(legend.position = "none"), 
+                                       plot_4 + theme(legend.position = "none"), 
+                                       plot_5 + theme(legend.position = "none"), 
+                                       plot_6 + theme(legend.position = "none")),
+                       nrow = 3,labels = c("1.5°C","2°C","3°C","4°C","5°C","6°C"),label_fontfamily = "Georgia")
+        B <- plot_grid(A,legend,nrow=2,rel_heights = c(1,0.2))
+        ggsave(filename = here("output","figures",paste0("MapSig_",m,"_",k,"_",j,"_",n,".jpg")),plot = B,height = 6,width = 6)
+      }
+    }
+  }
+}
+
+
+
+# countries <- c("USA","IND","BGD","CHN","BRA","RUS")
+# ggplot(test %>% filter(sig.90==1,iso %in% countries),aes(x=final_temp,color=iso)) + 
+#   geom_line(aes(y=pc.50))
+#ggsave(plot,filename = here("output","figures",paste0("Map_",model,".pdf")),device = cairo_pdf,height=8,width = 6)
+
+```

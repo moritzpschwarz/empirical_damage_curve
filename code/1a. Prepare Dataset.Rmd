@@ -1,0 +1,264 @@
+---
+title: "Prepare Dataset for Estimation"
+author: "Moritz Schwarz and Felix Pretis"
+version: "2 June 2020"
+output:
+  html_document:
+    df_print: paged
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+Note just for me (Moritz): Nothing has been changed from the code file ```20200316 Trial GDP Interaction with ln_gdp and gets.R```. If you want to use LASSO or isat, please go back to that file.
+
+
+**October 2020:**
+This script creates the file selection_matrix.csv and needs the file damage_curve_country_dataset_timetrends_updated02-19.csv as input.
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+
+rm(list = ls())
+
+knitr::opts_chunk$set(message = F,echo = T)
+```
+
+# Control Panel
+```{r}
+poor_dummy_used     = FALSE        # default: FALSE
+only_BHM            = FALSE        # default: FALSE
+no_BHM              = FALSE        # default: FALSE
+use_diffs           = FALSE        # default: FALSE
+use_lags            = FALSE        # default: FALSE
+include_penn        = FALSE        # default: FALSE
+use_intercept       = FALSE        # default: FALSE
+
+run_iis             = FALSE        # default: FALSE
+load_iis            = TRUE         # default: TRUE
+save_iis            = FALSE        # default: FALSE
+iis_level           = 0.001        # default: 0.001
+
+run_lasso           = FALSE        # default: FALSE
+load_lasso          = TRUE         # default: TRUE
+
+run_getsm           = FALSE        # default: FALSE
+load_getsm          = TRUE         # default: TRUE
+selection_level     = 0.05         # default: 0.05
+```
+
+## Sanity checks
+```{r}
+if(only_BHM&use_lags){stop(" S T O P - Check Specification");Sys.sleep(30)}
+if(run_iis&!load_iis){stop(" S T O P - Check Specification");Sys.sleep(30)}
+if(run_getsm&!load_getsm&!only_BHM){stop(" S T O P - Check Specification");Sys.sleep(30)}
+if(!run_iis&save_iis){stop(" S T O P - Check Specification");Sys.sleep(30)}
+```
+
+# Load the Data
+```{r}
+country_dataset <- fread(here("data","use","damage_curve_country_dataset_timetrends_updated02-19.csv"))
+```
+
+Remove the unwanted variables - in our case we don't want the diffs, the economic variables for now and other forms of the growth variable.
+```{r}
+drop <- vector()
+```
+
+Drops diferent forms of the GDP per capita growth variable (Industry, Agriculture and Service)
+```{r}
+wdi <- c("gdp_cap_pc_growth","ln_gdp_cap","L1.ln_gdp_cap","agricult_growth","industry_growth","service_growth")
+drop <- append(drop,wdi)
+```
+
+Remove the two global time trends - we still keep the country-specific time trends.
+```{r}
+drop <- append(drop,c("time","time_2"))
+#drop <- append(drop,names(country_dataset)[grepl("time",names(country_dataset))]) #this could be adapted if you only want to run global time trends
+```
+
+We remove the differenced variables, which we'd only needed for an equilibrium correction model as well as all variables from the Penn World Tables.
+```{r}
+if(!use_diffs){
+  diffs <- country_dataset %>% select(starts_with("diff.")) %>% names %>% .[.!="diff.ln_gdp_cap"] #
+  drop <- append(drop,diffs)
+}
+if(!include_penn){
+  penn <- c("rgdpe","pop","csh_x","csh_m","pwt_gdp_pc","ln_pwt_gdp_pc","L1.rgdpe","L1.pop","L1.csh_x","L1.csh_m","L1.pwt_gdp_pc","L1.ln_pwt_gdp_pc",
+            "hc","csh_g","pl_i","trade","L1.hc","L1.csh_g","L1.pl_i","L1.trade") #only needed if using system-based modelling
+  drop <- append(drop,penn)
+}
+if(only_BHM){
+  climdex <- names(country_dataset[which(names(country_dataset)=="CDD"):which(names(country_dataset)=="L1.WSDI_2")])
+  drop <- append(drop,climdex)
+}
+if(!use_lags){
+  lags <- country_dataset %>% select(starts_with("L1.")) %>% names %>% .[.!="L1.diff.ln_gdp_cap"]
+  drop <- append(drop,lags)
+}
+if(no_BHM){
+  drop <- append(drop,c("temp","temp_2","prcp","prcp_2","L1.temp","L1.temp_2","L1.prcp","L1.prcp_2"))
+}
+```
+
+
+```{r, message=FALSE}
+# Complete Cases ----------------------------------------------------------
+cleaned <- country_dataset %>% select(-drop) #drops all unneeded variables
+#complete cases
+cleaned_comp <- cleaned %>% filter(complete.cases(.)) #retains only complete cases
+
+### drop year but save it separately
+year.x <- cleaned_comp %>% select(year)
+cleaned_comp <- cleaned_comp %>% select(-year)
+
+### drop gdp_cap but save it separately
+gdp_cap.x <- cleaned_comp %>% select(gdp_cap)
+cleaned_comp <- cleaned_comp %>% select(-gdp_cap)
+
+
+regr <- lm(diff.ln_gdp_cap ~ .-1,data=cleaned_comp[,-c(which(names(cleaned_comp)=="iso"))]) #regresses growth over everything
+
+#complete coefficients
+drop <- names(coefficients(regr))[which(is.na(coefficients(regr)))] #checks which coefficients are na in the above regression
+cleaned_comp_drop <- cleaned_comp[,!names(cleaned_comp) %in% drop] #drops the coefficients which were na
+dep_var <- cleaned_comp_drop$diff.ln_gdp_cap #saves the growth variable
+
+###drop iso
+iso.x <- cleaned_comp_drop$iso
+cleaned_comp_drop <- cleaned_comp_drop[,-c(which(names(cleaned_comp_drop)=="iso"))]
+
+dep_var_name <- c("diff.ln_gdp_cap")
+selection_matrix_std <- as.matrix(cleaned_comp_drop[,!names(cleaned_comp_drop) %in% dep_var_name]) # drops the growth variable and saves the remaining variables and cases as selection matrix
+```
+
+
+# Load Impulse Indicator Saturation
+There is a chunk that we'd only need if we wanted to run IIS
+```{r Run IIS, echo=FALSE}
+if(run_iis){
+  iis <- isat(y=dep_var,
+              if(use_intercept){mc=TRUE}else{mc=FALSE},
+              ar=NULL, 
+              mxreg=selection_matrix_std,
+              iis = T,
+              sis=F,
+              t.pval = iis_level,
+              parallel.options = detectCores())
+  
+  
+  if(save_iis){
+    save(iis,file = here("data","temp",paste0("iis_",
+                           if(use_lags){"lag_"}else{"nolag_"},
+                           if(use_intercept){"intcp_"}else{"nointcp_"},
+                           if(only_BHM){"onlyBHM_"}else{""},
+                           if(no_BHM){"noBHM_"}else{""},
+                           iis_level,
+                           ".RData")))
+  }
+}
+```
+But most of the time we will load the IIS file.
+```{r}
+if(load_iis){
+  fl <- list.files(here("data","temp"))
+  fl <- fl[grepl("iis",fl)]
+  fl <- fl[grepl(if(use_intercept){"_intcp_"}else{"_nointcp_"},fl)]
+  fl <- fl[grepl(if(use_lags){"_lag_"}else{"_nolag_"},fl)]
+  fl <- fl[grepl(iis_level,fl)]
+  if(only_BHM){fl <- fl[grepl("_onlyBHM_",fl)]} else {fl <- fl[!grepl("_onlyBHM_",fl)]}
+  if(no_BHM){fl <- fl[grepl("_noBHM_",fl)]} else {fl <- fl[!grepl("_noBHM_",fl)]}
+  x <- load(paste0(here("data","temp",fl)))
+  iis_1 = get(x)
+} else {iis_1 <- iis}
+
+# number of inidcators retained
+length(row.names(iis_1$mean.results)[grepl("iis+",row.names(iis_1$mean.results))])
+
+#again get the IIS indidcators that were found above - this time for the original dataset
+selection_matrix_orig <- cbind(selection_matrix_std,iim(x = 1:nrow(selection_matrix_std),which.ones = isatdates(x = iis_1)$iis$index))
+```
+Save out the selection matrix orig
+```{r}
+write_csv(data.frame(iso = iso.x, year = year.x,gdp_cap = gdp_cap.x, dep_var = dep_var,
+                     selection_matrix_orig),path = here("data","temp","selection_matrix.csv"))
+```
+
+
+
+# GETS
+Two-stage GETS:
+```{r, eval=FALSE}
+iis_getsm <- arx(y = dep_var,mxreg = selection_matrix_orig, tol = 1e-11, if(use_intercept){mc=T}else{mc=F})
+
+if(run_getsm){
+  all_time_trends <- grep("time",colnames(selection_matrix_orig),value=TRUE)
+all_iis <- grep("iis",colnames(selection_matrix_orig),value=TRUE)
+all_iso <- grep("iso",colnames(selection_matrix_orig),value=TRUE)
+all_year <- grep("year",colnames(selection_matrix_orig),value=TRUE)
+
+all_squared <- grep("_2",colnames(selection_matrix_orig),value=TRUE)
+all_squared <- all_squared[!grepl("year|time",all_squared)]
+all_linear <- colnames(selection_matrix_orig)[!grepl("_2|year|time|iis|iso|L1.diff.ln_gdp_cap",colnames(selection_matrix_orig))]
+all_linear_numbers <- grep(paste0("^",paste(all_linear,collapse = "$|^"),"$"),colnames(selection_matrix_orig))                #[!colnames(selection_matrix_orig) %in% c(all_squared,all_time_trends,all_iis,all_year,all_iso)],value=F)
+
+
+keep_vector_linear <- c(all_linear_numbers,
+                        grep("year_",colnames(selection_matrix_orig),value=FALSE),
+                        grep("iso_",colnames(selection_matrix_orig),value = FALSE),
+                        grep("iis",colnames(selection_matrix_orig),value=FALSE),
+                        grep("time_",colnames(selection_matrix_orig),value=FALSE))
+
+if(use_intercept){keep_vector_linear <- keep_vector_linear + 1}
+#load("data/iis and gets files/gets/two-stage/getsm_nolag_nointcp_0.05_stage1.RData")
+getsm_selection_stage_1 <- getsm(iis_getsm,
+                                 t.pval = selection_level,
+                                 do.pet=TRUE, 
+                                 ar.LjungB=NULL,
+                                 arch.LjungB=NULL, 
+                                 normality.JarqueB=NULL,
+                                 keep=keep_vector_linear)
+
+
+selection_matrix_orig_intermed <- selection_matrix_orig[,names(coef(getsm_selection_stage_1))]
+
+iis_getsm_intermed <- arx(y = dep_var,mxreg = selection_matrix_orig_intermed, tol = 1e-11, if(use_intercept){mc=T}else{mc=F})
+
+keep_vector_second_stage <- c(grep("year_",colnames(selection_matrix_orig_intermed),value=FALSE),
+                              grep("iso_",colnames(selection_matrix_orig_intermed),value = FALSE),
+                              grep("iis",colnames(selection_matrix_orig_intermed),value=FALSE),
+                              grep("time_",colnames(selection_matrix_orig_intermed),value=FALSE))
+
+
+if(use_intercept){keep_vector_second_stage <- keep_vector_second_stage + 1}
+
+getsm_selection_stage_2 <- getsm(iis_getsm_intermed,
+                                 t.pval = 0.05,
+                                 do.pet=TRUE, 
+                                 ar.LjungB=NULL,
+                                 arch.LjungB=NULL, 
+                                 normality.JarqueB=NULL,
+                                 keep=keep_vector_second_stage)
+
+
+
+save(getsm_selection_stage_1,file = here("data","temp",paste0("getsm_",
+                                           if(use_lags){"lag_"}else{"nolag_"},
+                                           if(use_intercept){"intcp_"}else{"nointcp_"},
+                                           if(only_BHM){"onlyBHM_"}else{""},
+                                           if(no_BHM){"noBHM_"}else{""},
+                                           "0.05",
+                                           "_stage1.RData")))
+
+save(getsm_selection_stage_2,file = here("data","temp",paste0("getsm_",
+                                           if(use_lags){"lag_"}else{"nolag_"},
+                                           if(use_intercept){"intcp_"}else{"nointcp_"},
+                                           if(only_BHM){"onlyBHM_"}else{""},
+                                           if(no_BHM){"noBHM_"}else{""},
+                                           "0.01",
+                                           "_stage2.RData")))
+}
+```

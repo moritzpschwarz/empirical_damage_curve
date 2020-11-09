@@ -1,0 +1,581 @@
+---
+title: "Headline Results"
+author: "Moritz Schwarz and Felix Pretis"
+version: "October 2020"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+```{r,purl = FALSE}
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 10)
+```
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+library(quantreg)
+
+
+rm(list = ls())
+select <- dplyr::select
+```
+
+# Impact Statements
+
+```{r}
+df <- read_csv(here("data","out","all_models_quantiles_sq.csv"))
+```
+
+## Global
+
+### Impact Table
+```{r}
+df %>% 
+  filter(specification=="standard") %>% 
+  #filter(!specification %in% c("AltRestr2","RestrAdapt")) %>% 
+  mutate(model = case_when(model=="lasso"~"LASSO",
+                           model=="BHM"~"AATPsq",
+                           model=="BMS1"~"BMS-Uniform",
+                           model=="BMS2"~"BMS-Fixed",
+                           model=="BMS3"~"BMS-PIP",
+                           TRUE~model)) %>% 
+  filter(final_temp<1.75|final_temp>4.5) %>%   
+  mutate(final_temp = ifelse(final_temp<1.75,1,2)) %>% 
+  mutate(final_temp = factor(final_temp,levels = c(1,2),labels = c("1.5°C",">4.5°C"))) %>% 
+  
+  group_by(baseline,model,specification,scenario,final_temp) %>% 
+  summarise(pc05 = mean(low),
+            med = mean(med),
+            pc95 = mean(high),.groups="drop") %>% 
+  mutate(model = factor(model,levels = c("gets","LASSO","AATPsq","BMS-Fixed","BMS-Uniform","BMS-PIP"))) %>%   
+  arrange(final_temp,baseline,specification,model) %>% 
+  mutate(across(c(pc05,med,pc95),~.-1)) 
+
+
+
+
+```
+
+
+
+```{r}
+df %>% 
+  filter(specification %in% c("first","last"),baseline=="SSP",scenario==2) -> ssp_first_last
+
+df %>% 
+  filter(specification %in% c("AltRestr1"),baseline=="SSP") %>% 
+  bind_rows(ssp_first_last,.) -> ssp_first_last
+
+
+
+df %>% 
+  filter(specification!="standard",baseline!="SSP") %>% 
+  filter(!specification %in% c("AltRestr2","RestrAdapt")) %>% 
+  bind_rows(ssp_first_last,.) %>% 
+  
+  #filter(!scenario %in% c(1,3,4,5) & specification=="last") %>% 
+  
+  #filter(specification == "first"|specification == "last" & scenario %in% c("Hundred","2"),.preserve = T) %>% 
+  
+  mutate(model = case_when(model=="lasso"~"LASSO",
+                           TRUE~model),
+         specification = case_when(specification=="AltRestr1"~"Income Adaptation",
+                                   specification=="first"~"First",
+                                   specification=="last"~"Last")) %>% 
+  filter(final_temp<1.75|final_temp>4.5) %>%   
+  mutate(final_temp = ifelse(final_temp<1.75,1,2)) %>% 
+  mutate(final_temp = factor(final_temp,levels = c(1,2),labels = c("1.5°C",">4.5°C"))) %>% 
+  
+  group_by(baseline,model,specification,scenario,final_temp) %>% 
+  summarise(pc05 = mean(low),
+            med = mean(med),
+            pc95 = mean(high),.groups="drop") %>% 
+  mutate(model = factor(model,levels = c("gets","LASSO")),
+         specification = factor(specification,levels = c("Income Adaptation","First","Last"))) %>%   
+  arrange(final_temp,baseline,model,specification) %>% 
+  mutate(across(c(pc05,med,pc95),~.-1))
+
+```
+
+
+### Gets
+```{r}
+df %>% 
+  filter(model=="gets",baseline=="Mueller",specification=="standard") %>% 
+  filter(final_temp<1.75|final_temp>4.5) %>% 
+  mutate(final_temp = ifelse(final_temp<1.75,1,2)) %>% 
+  mutate(final_temp = factor(final_temp,levels = c(1,2),labels = c("Low End","High End"))) %>% 
+  group_by(baseline,model,specification,final_temp) %>% 
+  summarise(pc05 = mean(low),
+            med = mean(med),
+            pc95 = mean(high),.groups="drop") %>% 
+  
+  #select(-vlow,-vhigh,-midh,-midl) %>% 
+  
+  mutate(across(c(pc05,med,pc95),~.-1))
+
+```
+
+### Range
+
+```{r}
+df %>% 
+  filter(model!="gets",baseline=="Mueller",specification=="standard") %>% 
+  filter(final_temp<1.75|final_temp>4.5) %>% 
+  mutate(final_temp = ifelse(final_temp<1.75,1,2)) %>% 
+  mutate(final_temp = factor(final_temp,levels = c(1,2),labels = c("Low End","High End"))) %>% 
+  group_by(baseline,model,specification,final_temp) %>% 
+  summarise(pc05 = mean(low),
+            med = mean(med),
+            pc95 = mean(high),.groups="drop") %>% 
+  
+  #select(-vlow,-vhigh,-midh,-midl) %>% 
+  
+  mutate(across(c(pc05,med,pc95),~.-1)) %>% 
+  arrange(final_temp)
+
+```
+
+## Adaptation
+
+```{r}
+df %>% 
+  filter(model=="gets",baseline=="Mueller",specification!="standard") %>% 
+  filter(final_temp<1.75|final_temp>4.5) %>% 
+  mutate(final_temp = ifelse(final_temp<1.75,1,2)) %>% 
+  mutate(final_temp = factor(final_temp,levels = c(1,2),labels = c("Low End","High End"))) %>% 
+  group_by(baseline,model,specification,final_temp) %>% 
+  summarise(pc05 = mean(low),
+            med = mean(med),
+            pc95 = mean(high),.groups="drop") %>% 
+  
+  #select(-vlow,-vhigh,-midh,-midl) %>% 
+  
+  mutate(across(c(pc05,med,pc95),~.-1)) %>% 
+  arrange(final_temp)
+```
+
+
+# Country-specific
+```{r}
+df_iso <- read_csv(here("data","out","all_models_iso_quantiles_25Oct_sq.csv"))
+
+df_iso %>% 
+  filter(model=="gets",baseline=="Mueller",specification=="standard") %>% 
+  filter(final_temp<4) %>% 
+  filter(med < 0.3) %>% 
+  distinct(iso)
+
+
+df_iso %>% 
+  filter(model=="LASSO",baseline=="Mueller",specification=="standard") %>% 
+  mutate(across(c(pc05,med,pc95),~.-1)) %>% 
+  #filter(final_temp<5) %>% 
+  filter(med < 0.2) %>% 
+  distinct(iso)
+
+filter(final_temp<1.75|final_temp>4.5) %>% 
+  mutate(final_temp = ifelse(final_temp<1.75,1,2)) %>% 
+  mutate(final_temp = factor(final_temp,levels = c(1,2),labels = c("Low End","High End"))) %>% 
+  group_by(baseline,model,specification,final_temp) %>% 
+  summarise(pc05 = mean(low),
+            med = mean(med),
+            pc95 = mean(high),.groups="drop") %>% 
+  
+  #select(-vlow,-vhigh,-midh,-midl) %>% 
+  
+  mutate(across(c(pc05,med,pc95),~.-1))
+
+```
+
+
+# Function
+```{r}
+files  <- list.files(here("data","out"),pattern = "Mueller_gets_massive_EOC",full.names = T)
+load(files)
+
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp ,tau = 0.5,method = "pfn") -> linmodel
+
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp),tau = 0.5,method = "pfn") -> sqmodel
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp)+ I(final_temp*final_temp*final_temp),tau = 0.5,method = "pfn") -> cubmodel
+
+c(AIC(linmodel),AIC(sqmodel),AIC(cubmodel))
+
+c(BIC(linmodel),BIC(sqmodel),BIC(cubmodel))
+```
+## RQ Table 
+### gets
+```{r}
+files  <- list.files(here("data","out"),pattern = "Mueller_gets_massive_EOC",full.names = T)
+load(files)
+
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp ,tau = 0.5,method = "pfn") -> linmodel
+
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp),tau = 0.5,method = "pfn") -> sqmodel
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp)+ I(final_temp*final_temp*final_temp),tau = 0.5,method = "pfn") -> cubmodel
+
+c(AIC(linmodel),AIC(sqmodel),AIC(cubmodel))
+
+
+stargazer(
+  linmodel,
+  sqmodel,
+  cubmodel,
+  massive_overall %>% 
+    mutate(diff = diff-1) %>% 
+    rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp)+ I(final_temp*final_temp*final_temp),tau = 0.05,method = "pfn"),
+  massive_overall %>% 
+    mutate(diff = diff-1) %>% 
+    rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp)+ I(final_temp*final_temp*final_temp),tau = 0.95,method = "pfn"),
+  type = "html",
+  covariate.labels = c(
+    "Temperature Anomaly",
+    "Temperature Anomaly Squared",
+    "Temperature Anomaly Cubed",
+    "Constant"
+  ),
+  dep.var.labels = "Median Difference to Baseline",
+  add.lines = list(c("Percentile","50%","50%","50%","5%","95%")),
+  title = "gets Projection Results",
+  out = here("output","gets standard RQ table.html")
+)
+```
+
+### LASSO
+```{r}
+files  <- list.files(here("data","out"),pattern = "Mueller_LASSO_massive_EOC",full.names = T)
+load(files)
+
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp ,tau = 0.5,method = "pfn") -> linmodel
+
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp),tau = 0.5,method = "pfn") -> sqmodel
+massive_overall %>% 
+  mutate(diff = diff-1) %>% 
+  rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp)+ I(final_temp*final_temp*final_temp),tau = 0.5,method = "pfn") -> cubmodel
+
+stargazer(
+  linmodel,
+  sqmodel,
+  cubmodel,
+  massive_overall %>% 
+    mutate(diff = diff-1) %>% 
+    rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp)+ I(final_temp*final_temp*final_temp),tau = 0.05,method = "pfn"),
+  massive_overall %>% 
+    mutate(diff = diff-1) %>% 
+    rq(data = .,formula = diff ~ final_temp + I(final_temp*final_temp)+ I(final_temp*final_temp*final_temp),tau = 0.95,method = "pfn"),
+  type = "html",
+  covariate.labels = c(
+    "Temperature Anomaly",
+    "Temperature Anomaly Squared",
+    "Temperature Anomaly Cubed",
+    "Constant"
+  ),
+  dep.var.labels = "Relative Difference to Baseline",
+  add.lines = list(c("Percentile","50%","50%","50%","5%","95%")),
+  title = "LASSO Projection Results",
+  out = here("output","LASSO standard RQ table.html")
+)
+```
+
+
+
+```{r}
+round(coefficients(linmodel),3)
+```
+
+
+```{r}
+round(coefficients(cubmodel),3)
+```
+
+
+```{r}
+round(coefficients(sqmodel),3)
+```
+
+
+```{r}
+get_func <- function(mod) {
+  vars <- as.list(attr(mod$terms, "variables"))[-(1:2)]
+  funcs <- lapply(vars, function(x) list(quote(`*`), 1, x))
+  terms <- mapply(function(x, y) {x[[2]] <- y; as.call(x)}, funcs, mod$coefficients[-1],
+                  SIMPLIFY = FALSE)
+  terms <- c(as.numeric(mod$coefficients[1]), terms)
+  body <- Reduce(function(a, b) as.call(list(quote(`+`), a, b)), terms)
+  vars <- setNames(lapply(seq_along(vars), function(x) NULL), sapply(vars, as.character))
+  f <- as.function(c(do.call(alist, vars), body))
+  formals(f) <- formals(f)[!grepl("\\(", names(formals(f)))]
+  f
+}
+sq_fun <- get_func(sqmodel)
+
+D(sq_fun,name = "final_temp")
+
+ggplot() + 
+  geom_line(aes(x=0:6,y=sq_fun(0:6)))
+```
+
+
+```{r}
+cub_fun <- get_func(cubmodel)
+
+ggplot() + 
+  geom_line(aes(x=0:6,y=cub_fun(0:6)))
+```
+
+# DICE
+
+**Note**: Not included in PNAS Submission October 2020
+
+<!-- ```{r} -->
+<!-- round(coefficients(sqmodel),3) -->
+
+<!-- library(R.matlab) -->
+
+<!-- dice_output <- readMat(here("code","DICE2013R version2.1 from Github Kellet et al - Schwarz and Pretis","version2.1 - NoAdapt","MATLAB_output_noadapt_intcp.mat")) -->
+<!-- str(dice_output) -->
+
+<!-- opt_welfare <- dice_output$J -->
+
+<!-- dice_df <- data.frame(year = seq(2015,2510,5), -->
+<!--                       scc=t(dice_output$SCC), -->
+<!--                       mitigation = t(dice_output$u.opt)[,1], -->
+<!--                       savings = t(dice_output$u.opt)[,2], -->
+<!--                       atmos_temp = t(dice_output$x.opt)[-101,1], -->
+<!--                       lower_ocean_temp = t(dice_output$x.opt)[-101,2], -->
+<!--                       atmos_conc = t(dice_output$x.opt)[-101,3], -->
+<!--                       atmos_conc_up = t(dice_output$x.opt)[-101,4], -->
+<!--                       atmos_conc_lo = t(dice_output$x.opt)[-101,5], -->
+<!--                       capital = t(dice_output$x.opt)[-101,6]) -->
+
+<!-- rm(dice_output) -->
+
+<!-- dice_2016 <- read.csv(here("code","DICE2013R version2.1 from Github Kellet et al - Schwarz and Pretis","version2.1 - NoAdapt","GAMS_Results_2016.csv"),header = F,strip.white = T) -->
+<!-- names(dice_2016) <- c("variable",seq(2015,2510,5)) -->
+<!-- dice_2016 %>%  -->
+<!--   pivot_longer(-c(variable),"year","value") %>%  -->
+<!--   pivot_wider(id_cols = "year",names_from ="variable",values_from = "value") %>%  -->
+<!--   setNames(c("year", "atmos_conc", "atmos_conc_lo", "atmos_conc_up", "atmos_temp",  -->
+<!--              "capital", "cost1 == theta1", "mitigation", "Land emissions", "lower_ocean_temp", "Other Forcings",  -->
+<!--              "Population", "savings", "sigma", "scc", "TFP")) -> dice_2016 -->
+
+<!-- period_of_interest <- 2020:2100 -->
+<!-- my_palette = RColorBrewer::brewer.pal(n = 9, "RdBu")[c(1,8)] -->
+
+
+
+<!-- dice_2016 %>%  -->
+<!--   select(all_of(dice_df %>% names)) %>%  -->
+<!--   pivot_longer(-year,"variable","value") %>%  -->
+<!--   mutate(version="Nordhaus", -->
+<!--          year = as.numeric(year)) %>%  -->
+<!--   bind_rows(.,dice_df %>%  -->
+<!--               pivot_longer(-year,"variable","value") %>%  -->
+<!--               mutate(version="Schwarz and Pretis")) %>%  -->
+<!--   mutate(var_version = paste0(variable,version)) -> joint_df -->
+
+
+
+<!-- scc_plot <-  -->
+<!--   ggplot(joint_df[joint_df$variable=="scc"&joint_df$year %in% period_of_interest,],aes(x=year)) +  -->
+<!--   geom_line(aes(y=value,group=var_version,color=var_version),size=1) + -->
+<!--   geom_hline(aes(yintercept=0)) + -->
+<!--   scale_y_continuous(labels=scales::dollar) + -->
+<!--   labs(title = "", -->
+<!--        subtitle = "Social Cost of Carbon", -->
+<!--        x="", -->
+<!--        y="Social Cost of Carbon") + -->
+<!--   scale_color_manual(values = my_palette,name="DICE Versions",labels=c("Nordhaus-DICE2016R","DICE2016R with Empirical Damage Function"))+ -->
+<!--   theme(legend.position = "bottom", -->
+<!--         panel.spacing.x = unit(0.5, "lines"), -->
+<!--         panel.grid.minor = element_blank(), -->
+<!--         panel.background = element_blank(), -->
+<!--         axis.ticks = element_blank(), -->
+<!--         axis.text.y = element_text(color = "grey70"), -->
+<!--         axis.title.y = element_text(margin = margin(r = 20), color = "grey70"), -->
+<!--         axis.title.x = element_text(margin = margin(t = 20), color = "darkslategrey"), -->
+<!--         plot.title = element_text(size = 15, margin = margin(b = 10),hjust = 0), -->
+<!--         plot.subtitle = element_text(size = 12, color = "darkslategrey", margin = margin(b = 25)), -->
+<!--         plot.caption = element_text(size = 8, margin = margin(t = 10), color = "grey70", hjust = 0), -->
+<!--         plot.background = element_blank(), -->
+<!--         strip.text = element_text(size = 15), -->
+<!--         strip.text.x = element_text(margin = margin(b = 5, t = 0)), -->
+<!--         strip.background = element_blank(), -->
+<!--         text = element_text(family = "Georgia")) -->
+
+
+
+<!-- ``` -->
+
+
+
+# CMIP5 List
+
+```{r}
+temp_list <- read_csv(here("data","temp","cmip_end_temperature_anomaly_2090-2099_climateexplorer.csv"))
+temp_list %>% 
+  rename(Model = Model.Name,
+         final_temp = Temperature.in.2100) -> temp_list
+
+
+
+
+files  <- list.files(here("data","out"),pattern = "massive_EOC",full.names = T)
+files <- files[!grepl("SSP|first|last|detailed|interaction|iso",files)]
+overall <- tibble()
+for(i in files){
+  #i=1
+  load(i)
+  
+  name = gsub("C:/Users/morit/Documents/GitHub/empirical_damage_curve/data/out/Mueller_|_massive_EOC.RData","",i)
+  
+  tibble(final_temp = massive_overall %>% distinct(final_temp) %>% pull(final_temp)) %>% 
+    mutate(value = 1) %>% 
+    rename_with(.cols = value,.fn=~paste0(name)) %>% 
+    full_join(temp_list,by="final_temp") %>% 
+    arrange(final_temp) -> temp_list
+  # 
+  # tibble(name = gsub("C:/Users/morit/Documents/GitHub/empirical_damage_curve/data/out/Mueller_","",i,fixed=T),
+  #        ) %>% 
+  #   mutate(name = gsub("_massive_EOC.RData","",name),
+  #          value = 1) %>% 
+  #   bind_rows(overall,.) -> overall
+  
+  
+}
+
+
+temp_list %>% 
+  mutate(final_temp = round(final_temp,3),
+         RCP = gsub("rcp","",RCP),
+         RCP = as.numeric(RCP)/10,
+         across(c(gets,LASSO,BMS1,BMS2,BMS3,BHM),~as.character(.)), 
+         across(c(gets,LASSO,BMS1,BMS2,BMS3,BHM),~case_when(.=="1"~"Y",
+                                                            is.na(.)~"N"))) %>% 
+  filter(final_temp < 2.279) %>% 
+  rename(`End of Century Temperature`=final_temp,
+         AATPsq = BHM,
+         `BMS-Uniform` = BMS1,
+         `BMS-Fixed` = BMS2,
+         `BMS-PIP` = BMS3) %>% 
+  select(Model,RCP,Ensemble,`End of Century Temperature`,gets,LASSO,AATPsq,`BMS-Uniform`,`BMS-Fixed`,`BMS-PIP`) %>% 
+  
+  
+  
+  stargazer::stargazer(.,
+                       type = "html",
+                       summary = FALSE,
+                       align = TRUE,
+                       font.size = "tiny",
+                       rownames = FALSE,
+                       out = here("output","CMIP5_table1.html"),
+                       title = "CMIP5 Models Considered and Selected - Part 1")
+
+
+temp_list %>% 
+  mutate(final_temp = round(final_temp,3),
+         RCP = gsub("rcp","",RCP),
+         RCP = as.numeric(RCP)/10,
+         across(c(gets,LASSO,BMS1,BMS2,BMS3,BHM),~as.character(.)), 
+         across(c(gets,LASSO,BMS1,BMS2,BMS3,BHM),~case_when(.=="1"~"Y",
+                                                            is.na(.)~"N"))) %>% 
+  filter(final_temp >= 2.279 & final_temp < 3) %>% 
+  rename(`End of Century Temperature`=final_temp,
+         AATPsq = BHM,
+         `BMS-Uniform` = BMS1,
+         `BMS-Fixed` = BMS2,
+         `BMS-PIP` = BMS3) %>% 
+  select(Model,RCP,Ensemble,`End of Century Temperature`,gets,LASSO,AATPsq,`BMS-Uniform`,`BMS-Fixed`,`BMS-PIP`) %>% 
+  
+  
+  
+  stargazer::stargazer(.,
+                       type = "html",
+                       summary = FALSE,
+                       align = TRUE,
+                       font.size = "tiny",
+                       rownames = FALSE,
+                       out = here("output","CMIP5_table2.html"),
+                       title = "CMIP5 Models Considered and Selected - Part 2")
+
+
+temp_list %>% 
+  mutate(final_temp = round(final_temp,3),
+         RCP = gsub("rcp","",RCP),
+         RCP = as.numeric(RCP)/10,
+         across(c(gets,LASSO,BMS1,BMS2,BMS3,BHM),~as.character(.)), 
+         across(c(gets,LASSO,BMS1,BMS2,BMS3,BHM),~case_when(.=="1"~"Y",
+                                                            is.na(.)~"N"))) %>% 
+  filter(final_temp >= 3 & final_temp < 4.8) %>% 
+  rename(`End of Century Temperature`=final_temp,
+         AATPsq = BHM,
+         `BMS-Uniform` = BMS1,
+         `BMS-Fixed` = BMS2,
+         `BMS-PIP` = BMS3) %>% 
+  select(Model,RCP,Ensemble,`End of Century Temperature`,gets,LASSO,AATPsq,`BMS-Uniform`,`BMS-Fixed`,`BMS-PIP`) %>% 
+  
+  
+  
+  stargazer::stargazer(.,
+                       type = "html",
+                       summary = FALSE,
+                       align = TRUE,
+                       font.size = "tiny",
+                       rownames = FALSE,
+                       out = here("output","CMIP5_table3.html"),
+                       title = "CMIP5 Models Considered and Selected - Part 3")
+
+
+temp_list %>% 
+  mutate(final_temp = round(final_temp,3),
+         RCP = gsub("rcp","",RCP),
+         RCP = as.numeric(RCP)/10,
+         across(c(gets,LASSO,BMS1,BMS2,BMS3,BHM),~as.character(.)), 
+         across(c(gets,LASSO,BMS1,BMS2,BMS3,BHM),~case_when(.=="1"~"Y",
+                                                            is.na(.)~"N"))) %>% 
+  filter(final_temp >= 4.8) %>% 
+  rename(`End of Century Temperature`=final_temp,
+         AATPsq = BHM,
+         `BMS-Uniform` = BMS1,
+         `BMS-Fixed` = BMS2,
+         `BMS-PIP` = BMS3) %>% 
+  select(Model,RCP,Ensemble,`End of Century Temperature`,gets,LASSO,AATPsq,`BMS-Uniform`,`BMS-Fixed`,`BMS-PIP`) %>% 
+  
+  
+  
+  stargazer::stargazer(.,
+                       type = "html",
+                       summary = FALSE,
+                       align = TRUE,
+                       font.size = "tiny",
+                       rownames = FALSE,
+                       out = here("output","CMIP5_table4.html"),
+                       title = "CMIP5 Models Considered and Selected - Part 4")
+
+```
+

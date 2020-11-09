@@ -1,0 +1,1305 @@
+---
+title: "Mueller et al Projection"
+subtitle: "Standard, Max GDP Restriction and Do-no-worse Restriction using Log Interactions"
+author: "Moritz Schwarz and Felix Pretis"
+version: "2 June 2020"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+```{r,purl = FALSE}
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 10)
+```
+
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+library(vroom)
+library(MASS)
+
+library(extrafont)
+library(RColorBrewer)
+library(Cairo)
+library(viridis)
+
+library(quantreg)
+
+library(ggalt)
+library(cowplot)
+
+
+rm(list = ls())
+select <- dplyr::select
+```
+
+
+**To create Server Script: Save first then**
+```{r,eval= TRUE, purl = FALSE}
+knitr::purl(here("code","7a. Mueller Effect Projections - Detailed.Rmd"),output = here("code","7a. Server_Mueller_Detailed.R"))
+```
+
+# Load Mueller at el data
+```{r, purl=FALSE}
+mueller <- readxl::read_excel(here("data","raw","Predictive_ Distributions_by_Country.xlsx"),
+                              skip = 6,col_names = c("iso","empty1","value_2017","empty2","fifty_mean","fifty_0.05",
+                                                     "fifty_0.16","fifty_0.5","fifty_0.84","fifty_0.95", "empty3","hundred_mean","hundred_0.05",
+                                                     "hundred_0.16","hundred_0.5","hundred_0.84","hundred_0.95", "empty4","unknown")) %>% select(-contains("empty"))
+
+mueller_mean <- mueller %>% 
+  select(iso, value_2017, contains("mean"))
+
+mueller_mean %>% 
+  mutate(year = 2017,
+         gdp_cap = exp(value_2017),
+         gdp_cap_fifty = gdp_cap,
+         gdp_cap_fifty_climate = gdp_cap_fifty,
+         gdp_cap_hundred = gdp_cap,
+         gdp_cap_hundred_climate = gdp_cap_hundred,
+         fifty_mean = (fifty_mean/100)+1,
+         hundred_mean = (hundred_mean/100)+1,
+         value_2017 = NULL,
+         gdp_cap = NULL) %>% 
+  select(iso,year,gdp_cap_fifty, gdp_cap_hundred,everything()) -> mueller_df
+```
+
+## Prepare the Max GDP Restriction
+Here we identify the 2017 Level of GDP that will act as our restriction.
+```{r, purl=FALSE}
+base_gdp <- mueller_df %>% filter(year==2017) %>% 
+  select(iso,gdp_cap_fifty,gdp_cap_hundred) %>% 
+  rename(base_fifty = gdp_cap_fifty,
+         base_hundred = gdp_cap_hundred)
+
+restrict_max_gdp_int = TRUE
+```
+
+
+
+
+```{r,purl=FALSE}
+coefsamples <- 100
+```
+
+
+# GETS
+## Load coefficients
+```{r, purl=FALSE}
+load(here("data","temp","standard_gets_model.RData"))
+####simulate coefficients, draw them form joint normal distribution
+set.seed(123)
+selection_coefs_standard <- MASS::mvrnorm(n = coefsamples, mu = standard_model %>% coef(), Sigma = standard_model %>% vcov()) %>%
+  {if (is.vector(.)) t(.) else .} %>%
+  data.frame() %>%
+  rename_all(~ tolower(.)) %>%
+  select(-l1.diff.ln_gdp_cap, -starts_with(c("year", "iis", "time", "iso"))) %>%
+  rename_all(~ paste0(., "_coef"))
+
+# If we are just using one coefsample, we simply use the mean estimate from the model
+if(coefsamples==1){
+  standard_model %>%
+    coef %>%
+    data.frame(variable = names(.),
+               coefficient = .,
+               row.names = NULL) %>%
+    pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+    rename_all(~tolower(.)) %>%
+    select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+    rename_all(~paste0(.,"_coef")) -> selection_coefs_standard
+}
+```
+
+
+```{r, eval= FALSE, purl = FALSE}
+# Set eval=TRUE to get a simple plot of the mean coefficient and the draws that were taken
+selection_coefs_standard %>% 
+  pivot_longer(cols = everything()) %>% 
+  ggplot(aes(x=value)) + 
+  geom_histogram() + 
+  facet_wrap(~name,scales = "free") + 
+  geom_vline(data = standard_model %>%
+               coef %>%
+               data.frame(variable = names(.),
+                          coefficient = .,
+                          row.names = NULL) %>%
+               pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+               rename_all(~tolower(.)) %>%
+               select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+               rename_all(~paste0(.,"_coef")) %>% pivot_longer(cols = everything()),aes(xintercept=value))
+
+```
+
+
+## Collect Relevant Information
+
+```{r, purl=FALSE}
+selection_coefs_standard %>% 
+  names %>% 
+  gsub("_coef","",.) %>% 
+  unique -> climate_vars
+
+selection_coefs_standard %>% 
+  names %>% 
+  gsub("_coef|_2","",.) %>% 
+  unique -> climate_vars_lin
+
+selection_coefs_standard %>% 
+  names %>% 
+  grep("_2",.,value = TRUE) %>% 
+  gsub("_coef|_2","",.) %>% 
+  unique -> climate_vars_sq
+
+# selection_coefs_interaction_all %>% 
+#   names %>% 
+#   gsub("_coef","",.) %>% 
+#   grep("_int",.,value = TRUE) %>% 
+#   gsub("_int","",.) %>% 
+#   unique -> interaction_vars_all
+# 
+# selection_coefs_interaction_selected %>%
+#   names %>%
+#   gsub("_coef","",.) %>%
+#   grep("_int",.,value = TRUE) %>%
+#   gsub("_int","",.) %>%
+#   unique -> interaction_vars_selected
+
+```
+
+## Load climate data
+```{r,purl=FALSE}
+climate <- vroom(here("data","temp","corrected_anomaly_climatedata.csv"))
+climate %>% 
+  select(model,rcp,ensemble,final_temp,iso,year,all_of(climate_vars_lin),
+         all_of(paste0(climate_vars_sq,"_2"))) %>% 
+  drop_na -> climate_subset
+#mutate(across(.cols = climate_vars_sq,.fns = list(`2` = ~.^2))) -> climate_subset
+rm(climate)
+```
+
+
+## Project (Server)
+```{r, purl=FALSE}
+library(doMC)
+registerDoMC(if(coefsamples < detectCores()){coefsamples} else {detectCores()-1})  # coefsamples if enough cores available - otherwise total-1
+foreach(v=1:coefsamples,.packages = loadedNamespaces()) %dopar% {
+  #for (v in 1:coefsamples){
+  print(v)
+  
+  # Calculate the climate effect
+  effect_standard <- climate_subset
+  for(var in climate_vars){
+    #print(var)
+    climate_subset %>% 
+      select(all_of(var)) %>% 
+      pull %>% "*"(selection_coefs_standard %>% 
+                     slice(v) %>% 
+                     select(all_of(paste0(var,"_coef"))) %>% 
+                     pull) %>%
+      as_tibble %>% 
+      rename_all(~paste0(var,"_effect"))  %>% 
+      bind_cols(effect_standard,.) -> effect_standard
+  }
+  
+  done <- mueller_df %>% 
+    select(-contains("fifty")) %>% 
+    filter(year==2017) %>% 
+    left_join(effect_standard %>% 
+                filter(year == 2017) %>% 
+                select(-model,-ensemble,-rcp),by = c("iso","year")) %>% 
+    mutate(realisation = v,
+           across(all_of(climate_vars),.fns = list(level=~0))) %>% 
+    relocate(c(realisation,final_temp), .after = year)
+  
+  for(i in 2018:2099){
+    print(paste0("Realisation ",v," Year: ",i))
+    done %>% 
+      filter(year == i-1) %>% 
+      select(iso, year, realisation, final_temp,contains("hundred"),ends_with("level")) %>% 
+      # this step: 
+      left_join(effect_standard %>% 
+                  filter(year == i-1) %>% 
+                  mutate(realisation = v) %>% 
+                  select(-model,-ensemble,-rcp),by = c("iso","year","final_temp","realisation")) %>% 
+      mutate(total_climate_effect = rowSums(select(., ends_with("effect")))) %>% 
+      mutate(gdp_cap_hundred = gdp_cap_hundred*hundred_mean,
+             gdp_cap_hundred_climate = gdp_cap_hundred_climate*(hundred_mean + total_climate_effect)) %>% 
+      
+      mutate(across(.cols = c(all_of(paste0(climate_vars,"_effect"))),~ . * gdp_cap_hundred_climate,.names = "{.col}_intermed1"),
+             across(.cols = c(all_of(paste0(climate_vars,"_effect_intermed1"))),
+                    .fns = ~ . + pull(cur_data(), gsub("effect_intermed1","level",cur_column())),  .names = "{.col}_intermed2"),
+             across(.cols = c(all_of(paste0(climate_vars,"_level"))),
+                    .fns = ~pull(cur_data(),gsub("level","effect_intermed1_intermed2",cur_column())))) %>% 
+      select(-contains("intermed")) %>% 
+      mutate(year = i) %>% 
+      bind_rows(done,.) -> done
+    
+  }
+  
+  save(done,file = here("data","temp","projections",paste0("detailed_Mueller_gets_",v,".RData")))
+  rm(done,done_summary,i)
+}
+```
+
+
+# LASSO
+
+## Load coefficients
+```{r, purl=FALSE}
+load(here("data","temp","standard_lasso_model.RData"))
+####simulate coefficients, draw them form joint normal distribution
+set.seed(123)
+selection_coefs_standard <- MASS::mvrnorm(n = coefsamples, mu = lasso_standard_model %>% coef(), Sigma = lasso_standard_model %>% vcov()) %>%
+  {if (is.vector(.)) t(.) else .} %>%
+  data.frame() %>%
+  rename_all(~ tolower(.)) %>%
+  select(-l1.diff.ln_gdp_cap, -starts_with(c("year", "iis", "time", "iso"))) %>%
+  rename_all(~ paste0(., "_coef"))
+
+# If we are just using one coefsample, we simply use the mean estimate from the model
+if(coefsamples==1){
+  lasso_standard_model %>%
+    coef %>%
+    data.frame(variable = names(.),
+               coefficient = .,
+               row.names = NULL) %>%
+    pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+    rename_all(~tolower(.)) %>%
+    select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+    rename_all(~paste0(.,"_coef")) -> selection_coefs_standard
+}
+```
+
+
+```{r, eval= FALSE, purl = FALSE}
+# Set eval=TRUE to get a simple plot of the mean coefficient and the draws that were taken
+selection_coefs_standard %>% 
+  pivot_longer(cols = everything()) %>% 
+  ggplot(aes(x=value)) + 
+  geom_histogram() + 
+  facet_wrap(~name,scales = "free") + 
+  geom_vline(data = lasso_standard_model %>%
+               coef %>%
+               data.frame(variable = names(.),
+                          coefficient = .,
+                          row.names = NULL) %>%
+               pivot_wider(names_from = "variable",values_from = "coefficient") %>%
+               rename_all(~tolower(.)) %>%
+               select(-l1.diff.ln_gdp_cap,-starts_with(c("year","iis","time","iso"))) %>% 
+               rename_all(~paste0(.,"_coef")) %>% pivot_longer(cols = everything()),aes(xintercept=value))
+
+```
+
+
+## Collect Relevant Information
+
+```{r, purl=FALSE}
+selection_coefs_standard %>% 
+  names %>% 
+  gsub("_coef","",.) %>% 
+  unique -> climate_vars
+
+selection_coefs_standard %>% 
+  names %>% 
+  gsub("_coef|_2","",.) %>% 
+  unique -> climate_vars_lin
+
+selection_coefs_standard %>% 
+  names %>% 
+  grep("_2",.,value = TRUE) %>% 
+  gsub("_coef|_2","",.) %>% 
+  unique -> climate_vars_sq
+
+# selection_coefs_interaction_all %>% 
+#   names %>% 
+#   gsub("_coef","",.) %>% 
+#   grep("_int",.,value = TRUE) %>% 
+#   gsub("_int","",.) %>% 
+#   unique -> interaction_vars_all
+# 
+# selection_coefs_interaction_selected %>%
+#   names %>%
+#   gsub("_coef","",.) %>%
+#   grep("_int",.,value = TRUE) %>%
+#   gsub("_int","",.) %>%
+#   unique -> interaction_vars_selected
+
+```
+
+## Load climate data
+```{r, purl=FALSE}
+climate <- vroom(here("data","temp","corrected_anomaly_climatedata.csv"))
+climate %>% 
+  select(model,rcp,ensemble,final_temp,iso,year,all_of(climate_vars_lin),
+         all_of(paste0(climate_vars_sq,"_2"))) %>% 
+  drop_na -> climate_subset
+#mutate(across(.cols = climate_vars_sq,.fns = list(`2` = ~.^2))) -> climate_subset
+rm(climate)
+```
+
+
+## Project (Server)
+```{r, purl=FALSE}
+library(doMC)
+registerDoMC(if(coefsamples < detectCores()){coefsamples} else {detectCores()-1})  # coefsamples if enough cores available - otherwise total-1
+foreach(v=1:coefsamples,.packages = loadedNamespaces()) %dopar% {
+  #for (v in 1:coefsamples){
+  print(v)
+  
+  # Calculate the climate effect
+  effect_standard <- climate_subset
+  for(var in climate_vars){
+    #print(var)
+    climate_subset %>% 
+      select(all_of(var)) %>% 
+      pull %>% "*"(selection_coefs_standard %>% 
+                     slice(v) %>% 
+                     select(all_of(paste0(var,"_coef"))) %>% 
+                     pull) %>%
+      as_tibble %>% 
+      rename_all(~paste0(var,"_effect"))  %>% 
+      bind_cols(effect_standard,.) -> effect_standard
+  }
+  
+  done <- mueller_df %>% 
+    select(-contains("fifty")) %>% 
+    filter(year==2017) %>% 
+    left_join(effect_standard %>% 
+                filter(year == 2017) %>% 
+                select(-model,-ensemble,-rcp),by = c("iso","year")) %>% 
+    mutate(realisation = v,
+           across(all_of(climate_vars),.fns = list(level=~0))) %>%
+    relocate(c(realisation,final_temp), .after = year)
+  
+  for(i in 2018:2099){
+    print(paste0("Realisation ",v," Year: ",i))
+    done %>% 
+      filter(year == i-1) %>% 
+      select(iso, year, realisation, final_temp,contains("hundred"),ends_with("level")) %>% 
+      # this step: 
+      left_join(effect_standard %>% 
+                  filter(year == i-1) %>% 
+                  mutate(realisation = v) %>% 
+                  select(-model,-ensemble,-rcp),by = c("iso","year","final_temp","realisation")) %>% 
+      mutate(total_climate_effect = rowSums(select(., ends_with("effect")))) %>% 
+      mutate(gdp_cap_hundred = gdp_cap_hundred*hundred_mean,
+             gdp_cap_hundred_climate = gdp_cap_hundred_climate*(hundred_mean + total_climate_effect)) %>% 
+      
+      mutate(across(.cols = c(all_of(paste0(climate_vars,"_effect"))),~ . * gdp_cap_hundred_climate,.names = "{.col}_intermed1"),
+             across(.cols = c(all_of(paste0(climate_vars,"_effect_intermed1"))),
+                    .fns = ~ . + pull(cur_data(), gsub("effect_intermed1","level",cur_column())),  .names = "{.col}_intermed2"),
+             across(.cols = c(all_of(paste0(climate_vars,"_level"))),
+                    .fns = ~pull(cur_data(),gsub("level","effect_intermed1_intermed2",cur_column())))) %>% 
+      select(-contains("intermed")) %>% 
+      mutate(year = i) %>% 
+      bind_rows(done,.) -> done
+    
+  }
+  
+  
+  save(done,file = here("data","temp","projections",paste0("detailed_Mueller_LASSO_",v,".RData")))
+  rm(done,done_summary,i)
+}
+```
+
+
+
+# Massive Anlysis Equivalent
+
+```{r, purl=TRUE, eval=TRUE}
+socio <- c("Mueller")
+model<- c("gets","LASSO")
+for(i in socio){
+  for(j in model){
+    #i = "SSP"
+    #j = "gets"
+    
+    print(paste("detailed",i,j,sep="_"))
+    print(length(list.files(here("data","temp","projections"),pattern = paste("detailed",i,j,sep="_"))))
+    
+    
+    # Carry out the merging of the files
+    indv_files <- list.files(here("data","temp","projections"),pattern = paste("detailed",i,j,sep="_"),full.names = TRUE)
+    
+    massive_overall <- tibble()
+    for(k in seq_along(indv_files)){
+      #progress(value = k,max.value = length(indv_files),progress.bar = TRUE)
+      
+      load(indv_files[k])
+      
+      
+      if(i == "Mueller"){
+        done %>%
+          filter(year > 2089) %>%
+          select(iso,year,realisation,final_temp,gdp_cap_hundred,gdp_cap_hundred_climate,contains("level")) %>% 
+          mutate(diff = gdp_cap_hundred_climate / gdp_cap_hundred) %>% 
+          group_by(.,iso,final_temp,realisation) %>%
+          summarise(across(.cols = c(diff,gdp_cap_hundred,gdp_cap_hundred_climate,contains("level")),.fns = mean),.groups =  "drop") %>%
+          bind_rows(massive_overall,.) -> massive_overall
+      } 
+      rm(done)
+    }
+    save(massive_overall, file=here("data","out",paste0(i,"_",j,"_massive_detailed_EOC.RData")))
+  }
+}
+
+
+```
+
+# Quantiles
+
+```{r, eval=TRUE, purl=TRUE}
+cubic=FALSE
+files  <- list.files(here("data","out"),pattern = "detailed_EOC",full.names = T)
+#files <- grep("BMS",files,value=T,ignore.case = FALSE)
+
+overall_df <- tibble()
+for(i in 1:length(files)){
+  #for(i in c(6,18)){
+  print(list.files(here("data", "out"), pattern = "detailed_EOC")[i])
+  load(files[i])
+  
+  # find variables which have both linear and squared term to combine them
+  massive_overall %>% 
+    select(ends_with("level")) %>% 
+    rename_with(.fn = ~gsub("_level","",.)) %>% names -> intermed
+  dupes <- gsub("_2","",intermed[duplicated(gsub("_2","",intermed))])
+  
+  massive_overall %>% 
+    rename_with(.fn = ~gsub("_level","",.)) %>% 
+    
+    {if(!identical(dupes, character(0))){
+      mutate(.,across(.cols = all_of(dupes),.fns = ~. + pull(cur_data(),paste0(cur_column(),"_2")))) %>% 
+        select(-all_of(paste0(dupes,"_2"))) 
+    } else{ . }} %>%  
+    
+    rename_with(.cols = c(-iso,-final_temp,-realisation,-diff,-gdp_cap_hundred,-gdp_cap_hundred_climate),.fn = ~paste0(.,"_level")) %>% 
+    mutate(across(.cols = ends_with("level"),.fns = ~./gdp_cap_hundred)) -> massive_overall
+  
+  
+  tibble(name = gsub("_massive_detailed_EOC", "",
+                     gsub(".RData", "", list.files(here("data", "out"), pattern = "detailed_EOC")[i], fixed = T))) %>%
+    separate(name, sep = "_", into = c("baseline", "model","spec"),fill = "right") -> name_df
+  
+  baseline <- name_df$baseline
+  model <- name_df$model
+  specification <- ifelse(is.na(name_df$spec),"standard",name_df$spec)
+  
+  
+  massive_overall %>% distinct(final_temp) -> temperature_axis
+  
+  
+  
+  
+  if(baseline == "Mueller"){
+    
+    for(country in unique(massive_overall$iso)){
+      for(var in massive_overall %>% select(-c(final_temp,iso,realisation,contains(c("effect","gdp","hundred","diff")))) %>% names){
+        form <- paste0(var," ~ final_temp + I(final_temp*final_temp)")
+        if(cubic){form <- paste0(form," + I(final_temp*final_temp*final_temp)")}
+        form <- as.formula(form)
+        success <- FALSE
+        while (!success) {
+          try({
+            print(country)
+            intermed <- massive_overall %>% filter(iso==country)
+            if(all(is.na(intermed$final_temp))){success <- TRUE;next}
+            
+            vlow <- rq(formula = form, data = intermed,method = "pfn",tau = 0.025)
+            low <- rq(formula = form, data = intermed,method = "pfn",tau = 0.05)
+            midl <- rq(formula = form, data = intermed,method = "pfn",tau = 0.25)
+            med <- rq(formula = form, data = intermed,method = "pfn",tau = 0.5)
+            midh <- rq(formula = form, data = intermed,method = "pfn",tau = 0.75)
+            high <- rq(formula = form, data = intermed,method = "pfn",tau = 0.95)
+            vhigh <- rq(formula = form, data = intermed,method = "pfn",tau = 0.975)
+            
+            
+            tibble(
+              final_temp = temperature_axis$final_temp,
+              baseline = baseline,
+              model = model,
+              specification = specification,
+              scenario = "Hundred",
+              iso = country,
+              variable = var,
+              vlow  = predict(vlow, newdata = temperature_axis),
+              low  =  predict(low, newdata = temperature_axis),
+              midl  = predict(midl, newdata = temperature_axis),
+              med  =  predict(med, newdata = temperature_axis),
+              midh  = predict(midh, newdata = temperature_axis),
+              high  = predict(high, newdata = temperature_axis),
+              vhigh = predict(vhigh, newdata = temperature_axis)
+            ) %>% 
+              bind_rows(overall_df, .) -> overall_df
+            success <- TRUE
+          },silent = FALSE)
+        }
+      }
+    }
+  } 
+  rm(vlow,low,midh,midl,med,high,vhigh)
+}
+
+overall_df %>% 
+  arrange(baseline,model,specification,scenario,final_temp) -> overall_df
+
+write_csv(overall_df,here("data","out",paste0("all_models_iso_quantiles_26Oct_detailed_",if(cubic){"cub"}else{"sq"},".csv")))
+
+```
+
+
+# Plotting
+
+
+## Damage Function
+### Global Quantiles
+
+```{r, eval=FALSE, purl=TRUE}
+cubic=FALSE
+files  <- list.files(here("data","out"),pattern = "detailed_EOC",full.names = T)
+#files <- grep("BMS",files,value=T,ignore.case = FALSE)
+
+overall_df <- tibble()
+for(i in 1:length(files)){
+  #for(i in c(6,18)){
+  print(list.files(here("data", "out"), pattern = "detailed_EOC")[i])
+  load(files[i])
+  
+  # find variables which have both linear and squared term to combine them
+  massive_overall %>% 
+    select(ends_with("level")) %>% 
+    rename_with(.fn = ~gsub("_level","",.)) %>% names -> intermed
+  dupes <- gsub("_2","",intermed[duplicated(gsub("_2","",intermed))])
+  
+  massive_overall %>% 
+    rename_with(.fn = ~gsub("_level","",.)) %>% 
+    
+    {if(!identical(dupes, character(0))){
+      mutate(.,across(.cols = all_of(dupes),.fns = ~. + pull(cur_data(),paste0(cur_column(),"_2")))) %>% 
+        select(-all_of(paste0(dupes,"_2"))) 
+    } else{ . }} %>%  
+    
+    rename_with(.cols = c(-iso,-final_temp,-realisation,-diff,-gdp_cap_hundred,-gdp_cap_hundred_climate),.fn = ~paste0(.,"_level")) %>% 
+    mutate(across(.cols = ends_with("level"),.fns = ~./gdp_cap_hundred)) -> massive_overall
+  
+  
+  tibble(name = gsub("_massive_detailed_EOC", "",
+                     gsub(".RData", "", list.files(here("data", "out"), pattern = "detailed_EOC")[i], fixed = T))) %>%
+    separate(name, sep = "_", into = c("baseline", "model","spec"),fill = "right") -> name_df
+  
+  baseline <- name_df$baseline
+  model <- name_df$model
+  specification <- ifelse(is.na(name_df$spec),"standard",name_df$spec)
+  
+  
+  massive_overall %>% distinct(final_temp) -> temperature_axis
+  
+  
+  
+  
+  if(baseline == "Mueller"){
+    
+    for(var in massive_overall %>% select(-c(final_temp,iso,realisation,contains(c("effect","gdp","hundred","diff")))) %>% names){
+      form <- paste0(var," ~ final_temp + I(final_temp*final_temp)")
+      if(cubic){form <- paste0(form," + I(final_temp*final_temp*final_temp)")}
+      form <- as.formula(form)
+      success <- FALSE
+      while (!success) {
+        try({
+          intermed <- massive_overall
+          if(all(is.na(intermed$final_temp))){success <- TRUE;next}
+          
+          vlow <- rq(formula = form, data = intermed,method = "pfn",tau = 0.025)
+          low <- rq(formula = form, data = intermed,method = "pfn",tau = 0.05)
+          midl <- rq(formula = form, data = intermed,method = "pfn",tau = 0.25)
+          med <- rq(formula = form, data = intermed,method = "pfn",tau = 0.5)
+          midh <- rq(formula = form, data = intermed,method = "pfn",tau = 0.75)
+          high <- rq(formula = form, data = intermed,method = "pfn",tau = 0.95)
+          vhigh <- rq(formula = form, data = intermed,method = "pfn",tau = 0.975)
+          
+          
+          tibble(
+            final_temp = temperature_axis$final_temp,
+            baseline = baseline,
+            model = model,
+            specification = specification,
+            scenario = "Hundred",
+            variable = var,
+            vlow  = predict(vlow, newdata = temperature_axis),
+            low  =  predict(low, newdata = temperature_axis),
+            midl  = predict(midl, newdata = temperature_axis),
+            med  =  predict(med, newdata = temperature_axis),
+            midh  = predict(midh, newdata = temperature_axis),
+            high  = predict(high, newdata = temperature_axis),
+            vhigh = predict(vhigh, newdata = temperature_axis)
+          ) %>% 
+            bind_rows(overall_df, .) -> overall_df
+          success <- TRUE
+        },silent = FALSE)
+      }
+    }
+  }
+} 
+
+overall_df %>% 
+  arrange(baseline,model,specification,scenario,final_temp) -> overall_df
+
+write_csv(overall_df,here("data","out",paste0("all_models_quantiles_26Oct_detailed_sq.csv")))
+
+```
+
+# Plotting
+
+```{r}
+overall_df <- read_csv(here("data","out",paste0("all_models_quantiles_26Oct_detailed_sq.csv")))
+```
+
+```{r}
+overall_df %>% 
+  mutate(baseline=ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+  mutate(model=case_when(model=="BHM"~"AATPsq",
+                         model=="BMS1"~"BMS-Uniform",
+                         model=="BMS2"~"BMS-Fixed",
+                         model=="BMS3"~"BMS-PIP",
+                         TRUE~model)) %>% 
+  filter(baseline=="MSW",specification == "standard") %>% 
+  
+  
+  mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+  mutate(variable = gsub("_level","",variable),
+         variable = ifelse(variable=="temp_2","temp",variable)) %>% 
+  ggplot(aes(x=final_temp,fill=model)) + 
+  
+  geom_hline(aes(yintercept = 0)) +
+  geom_ribbon(aes(ymin = midl,ymax = midh),alpha=0.2)+
+  geom_ribbon(aes(ymin = low,ymax = high),alpha=0.2)+
+  geom_ribbon(aes(ymin = vlow,ymax = vhigh),alpha=0.2)+
+  geom_line(aes(y=med)) + 
+  facet_grid(model~variable) +
+  
+  #scale_fill_brewer(palette = "RdBu")+
+  scale_fill_viridis_d() +
+  scale_y_continuous(labels = scales::percent)+
+  scale_x_continuous(labels = function(x){paste0(x,"°C")})+
+  #coord_cartesian(ylim = c(-1,1))+
+  
+  labs(x="Temperature Anomaly",y="GDP per capita impact to baseline",
+       title = "Standard Model Projections",subtitle = "IQR, 90% CI and 95% CI.")+
+  
+  theme_minimal() + 
+  theme(legend.position = "none",
+        panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+        text = element_text(family = "Georgia",size = 10),
+        axis.text.x.bottom = element_text(size = 5)) + 
+  ggsave(here("output","figures",paste0("DamageFunction_Standard_Detailed_sq.jpg")),width = 6,height = 6)
+
+
+```
+
+
+
+
+
+
+## Maps
+```{r}
+overall_df_iso <- read_csv(here("data","out","all_models_iso_quantiles_26Oct_detailed_sq.csv"))
+```
+
+
+Renaming and preparing
+```{r}
+overall_df_iso %>% 
+  mutate(baseline = case_when(baseline=="Mueller"~"MSW",
+                              TRUE~baseline)) %>% 
+  rename(pc.025 = vlow,
+         pc.05 = low,
+         pc.25 = midl,
+         pc.5 = med,
+         pc.75 = midh,
+         pc.95 = high,
+         pc.975 = vhigh) -> df
+```
+
+
+figure out in which map the value is showing up (Map Position)
+```{r}
+df %>% 
+  mutate(map_position = round(final_temp),
+         map_position = ifelse(final_temp < 1.75,1,map_position)) %>% 
+  
+  # average over the map position
+  group_by(baseline,model,specification,scenario,map_position,variable,iso) %>% 
+  summarise(across(where(is.numeric),.fns = mean),.groups = "drop") %>% 
+  mutate(sig.50 = ifelse(sign(pc.75)==sign(pc.25),1,0),
+         sig.90 = ifelse(sign(pc.95)==sign(pc.05),1,0),
+         sig.95 = ifelse(sign(pc.975)==sign(pc.025),1,0)) %>% 
+  select(-starts_with("pc."),pc.5) %>% 
+  
+  # Joining on the iso codes
+  mutate(region = countrycode::countrycode(sourcevar = iso,origin = "iso3c",destination = "country.name")) %>% 
+  relocate(region, .after = iso) %>% 
+  mutate(region = case_when(region=="Myanmar (Burma)"~"Myanmar",
+                            region=="Bosnia & Herzegovina"~"Bosnia and Herzegovina",
+                            region=="Congo - Brazzaville"~"Republic of Congo",
+                            region=="Congo - Kinshasa"~"Democratic Republic of the Congo",
+                            TRUE~region)) -> map_values
+```
+
+
+```{r}
+map_data("world") %>% 
+  filter(!region=="Antarctica") %>% 
+  mutate(region = case_when(region=="USA"~"United States",
+                            region=="UK"~"United Kingdom",
+                            region=="Czech Republic"~"Czechia",
+                            region=="Ivory Coast"~"Côte d’Ivoire",
+                            TRUE~region)) -> world_df
+
+```
+
+
+
+
+
+### Loop
+
+```{r}
+set_null_device("png")
+for(m in unique(map_values$baseline)){
+  if(is.na(m)){next}
+  for(k in unique(map_values$scenario)){
+    if(is.na(k)){next}
+    if(m=="MSW"&k %in% c(1:5)){next}
+    if(m=="SSP"& k == "Hundred"){next}
+    for(j in unique(map_values$specification)){
+      if(is.na(j)){next}
+      
+      world_df %>% 
+        full_join(map_values %>% 
+                    filter(baseline==m,
+                           scenario==k,
+                           specification==j),by="region") %>% 
+        # if 90% not significant, then NA
+        mutate(pc.5 = ifelse(sig.90 != 1, NA, pc.5)) -> intermed
+      
+      
+      
+      for(n in unique(intermed$model)){
+        if(is.na(n)){next}
+        #for(i in unique(map_values$map_position)){
+        
+        intermed %>% 
+          filter(model==n|is.na(model)) -> intermed_2
+        
+        for(i in 6){
+          if(is.na(i)){next}
+          
+          plotlist <- list()
+          for(h in 1:(intermed_2 %>% select(variable) %>% drop_na() %>% distinct(variable) %>% nrow)){
+            
+            # h = "r1mm_level"
+            print(paste(m,k,j,i,n,intermed_2 %>% 
+                          select(variable) %>% 
+                          drop_na() %>% 
+                          distinct(variable) %>% 
+                          slice(h),sep=" "))
+            
+            
+            plot_title <- gsub("_level","",intermed_2 %>% 
+                                 select(variable) %>% 
+                                 drop_na() %>% 
+                                 distinct(variable) %>% 
+                                 slice(h) %>% pull(variable))
+            
+            if(n=="gets"&gsub("_level","",intermed_2 %>% 
+                              select(variable) %>% 
+                              drop_na() %>% 
+                              distinct(variable) %>% 
+                              slice(h) %>% pull(variable))=="temp"){plot_title <- "temp + temp_2"}
+            
+            intermed_2 %>% 
+              filter(variable == intermed_2 %>% 
+                       select(variable) %>% 
+                       drop_na() %>% 
+                       distinct(variable) %>% 
+                       slice(h) %>% pull(variable) | is.na(variable)) %>% 
+              
+              
+              filter(map_position==i|is.na(map_position)) %>% 
+              
+              ggplot() +
+              #geom_polygon(data = map_data("world") %>%  filter(region !="Antarctica"),
+              #             aes(x=long,y=lat,group=group),fill="white",color="black",inherit.aes = FALSE,size=0.1)+
+              geom_polygon(aes(x=long,y=lat,group=group,fill=pc.5)) +
+              coord_proj("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs") +
+              
+              #facet_wrap(~variable)+
+              #coord_quickmap()+
+              scale_fill_gradientn(colours = brewer.pal(name = "RdBu",n=11), 
+                                   breaks = seq(from = -1, to = 1, by = 0.2),
+                                   guide = guide_colourbar(title = paste0("Level Percentage Difference to Baseline (",
+                                                                          m," - ",k,")"),
+                                                           title.position = "top"),
+                                   labels=c(as.character(scales::percent(seq(from = -1, to = 0.8, by = 0.2))),">100%"),
+                                   limits=c(-1,1),
+                                   oob=scales::squish,
+                                   na.value = "grey") +
+              labs(x=NULL,y=NULL, title = plot_title)+
+              
+              theme(legend.position = "bottom",
+                    panel.background = element_blank(),
+                    text = element_text(family = "Georgia"),
+                    axis.ticks = element_blank(),
+                    axis.text = element_blank()) -> plot
+            
+            #assign(x = paste("plot",i,j,k,m,sep = "_"),value = plot)
+            assign(x = paste("plot",h,sep = "_"),value = plot)
+            
+            plotlist[[h]] <- plot + theme(legend.position = "none")
+            
+            
+          }
+          
+        }
+        
+        legend <- get_legend(plot_2 + theme(legend.box.margin = margin(0, b = 10, 0, 0),
+                                            legend.key.size = unit(0.25, "cm"),
+                                            legend.key.width = unit(1.5,"cm"),
+                                            legend.text = element_text(family = "Georgia",size=8)))
+        
+        # A <- plot_grid(plotlist = list(plot_1 + theme(legend.position = "none"),
+        #                                plot_2 + theme(legend.position = "none"), 
+        #                                plot_3 + theme(legend.position = "none"), 
+        #                                plot_4 + theme(legend.position = "none"), 
+        #                                plot_5 + theme(legend.position = "none"), 
+        #                                plot_6 + theme(legend.position = "none")),
+        #                nrow = 3,labels = c("1.5°C","2°C","3°C","4°C","5°C","6°C"),label_fontfamily = "Georgia")
+        
+        A <- plot_grid(plotlist = plotlist,ncol=2)
+        
+        
+        B <- plot_grid(A,legend,nrow=2,rel_heights = c(1,0.1))
+        ggsave(filename = here("output","figures",paste0("MapDetail_",m,"_",k,"_",j,"_",n,".jpg")),plot = B,height = 6,width = 6)
+      }
+    }
+  }
+}
+
+
+
+# countries <- c("USA","IND","BGD","CHN","BRA","RUS")
+# ggplot(test %>% filter(sig.90==1,iso %in% countries),aes(x=final_temp,color=iso)) + 
+#   geom_line(aes(y=pc.50))
+#ggsave(plot,filename = here("output","figures",paste0("Map_",model,".pdf")),device = cairo_pdf,height=8,width = 6)
+
+```
+
+
+# Complicated Combined Figure
+## gets row with title
+
+```{r}
+overall_df %>% 
+  mutate(baseline=ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+  mutate(model=case_when(model=="BHM"~"AATPsq",
+                         model=="BMS1"~"BMS-Uniform",
+                         model=="BMS2"~"BMS-Fixed",
+                         model=="BMS3"~"BMS-PIP",
+                         TRUE~model)) %>% 
+  
+  filter(baseline=="MSW",specification == "standard",model=="gets") %>% 
+  
+  
+  mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+  mutate(variable = gsub("_level","",variable),
+         variable = ifelse(variable=="temp_2","temp",variable)) %>% 
+  ggplot(aes(x=final_temp,fill=model)) + 
+  
+  geom_hline(aes(yintercept = 0)) +
+  geom_ribbon(aes(ymin = midl,ymax = midh),alpha=0.2)+
+  geom_ribbon(aes(ymin = low,ymax = high),alpha=0.2)+
+  geom_ribbon(aes(ymin = vlow,ymax = vhigh),alpha=0.2)+
+  geom_line(aes(y=med)) + 
+  facet_grid(model~variable) +
+  
+  #scale_fill_brewer(palette = "RdBu")+
+  scale_fill_viridis_d() +
+  scale_y_continuous(labels = scales::percent)+
+  scale_x_continuous(labels = function(x){paste0(x,"°C")})+
+  #coord_cartesian(ylim = c(-1,1))+
+  
+  labs(x="Temperature Anomaly",y="GDP per capita impact to baseline",
+       title = "Standard Model Projections",subtitle = "IQR, 90% CI and 95% CI.")+
+  
+  theme_minimal() + 
+  theme(legend.position = "none",
+        panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+        text = element_text(family = "Georgia",size = 10),
+        axis.text.x.bottom = element_text(size = 5))  -> A
+```
+
+## gets Maps
+
+```{r}
+set_null_device("png")
+for(m in unique(map_values$baseline)){
+  if(is.na(m)){next}
+  for(k in unique(map_values$scenario)){
+    if(is.na(k)){next}
+    if(m=="MSW"&k %in% c(1:5)){next}
+    if(m=="SSP"& k == "Hundred"){next}
+    for(j in unique(map_values$specification)){
+      if(is.na(j)){next}
+      
+      world_df %>% 
+        full_join(map_values %>% 
+                    filter(baseline==m,
+                           scenario==k,
+                           specification==j),by="region") %>% 
+        # if 90% not significant, then NA
+        mutate(pc.5 = ifelse(sig.90 != 1, NA, pc.5)) -> intermed
+      
+      
+      
+      for(n in "gets"){
+        if(is.na(n)){next}
+        #for(i in unique(map_values$map_position)){
+        
+        intermed %>% 
+          filter(model==n|is.na(model)) -> intermed_2
+        
+        for(i in 6){
+          if(is.na(i)){next}
+          
+          plotlist <- list()
+          for(h in 1:(intermed_2 %>% select(variable) %>% drop_na() %>% distinct(variable) %>% nrow)){
+            
+            # h = "r1mm_level"
+            print(paste(m,k,j,i,n,intermed_2 %>% 
+                          select(variable) %>% 
+                          drop_na() %>% 
+                          distinct(variable) %>% 
+                          slice(h),sep=" "))
+            
+            
+            plot_title <- gsub("_level","",intermed_2 %>% 
+                                 select(variable) %>% 
+                                 drop_na() %>% 
+                                 distinct(variable) %>% 
+                                 slice(h) %>% pull(variable))
+            
+            intermed_2 %>% 
+              filter(variable == intermed_2 %>% 
+                       select(variable) %>% 
+                       drop_na() %>% 
+                       distinct(variable) %>% 
+                       slice(h) %>% pull(variable) | is.na(variable)) %>% 
+              
+              
+              filter(map_position==i|is.na(map_position)) %>% 
+              
+              ggplot() +
+              #geom_polygon(data = map_data("world") %>%  filter(region !="Antarctica"),
+              #             aes(x=long,y=lat,group=group),fill="white",color="black",inherit.aes = FALSE,size=0.1)+
+              geom_polygon(aes(x=long,y=lat,group=group,fill=pc.5)) +
+              coord_proj("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs") +
+              
+              #facet_wrap(~variable)+
+              #coord_quickmap()+
+              scale_fill_gradientn(colours = brewer.pal(name = "RdBu",n=11), 
+                                   breaks = seq(from = -1, to = 1, by = 0.2),
+                                   guide = guide_colourbar(title = paste0("Level Percentage Difference to Baseline (",
+                                                                          m," - ",k,")"),
+                                                           title.position = "top"),
+                                   labels=c(as.character(scales::percent(seq(from = -1, to = 0.8, by = 0.2))),">100%"),
+                                   limits=c(-1,1),
+                                   oob=scales::squish,
+                                   na.value = "grey") +
+              #labs(x=NULL,y=NULL, title = plot_title)+
+              labs(x=NULL,y=NULL, title = NULL)+
+              
+              theme(legend.position = "bottom",
+                    panel.background = element_blank(),
+                    text = element_text(family = "Georgia"),
+                    axis.ticks = element_blank(),
+                    axis.text = element_blank()) -> plot
+            
+            #assign(x = paste("plot",i,j,k,m,sep = "_"),value = plot)
+            assign(x = paste("plot",h,sep = "_"),value = plot)
+            
+            
+            
+            
+            plotlist[[h]] <- plot + theme(legend.position = "none") 
+            
+            
+            # if(h==1){
+            #   plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(r=-10))} else if(h==6){
+            #     plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(l=-10))} else {
+            #       plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(r=-10,l=-10))
+            #     }
+            
+            # if(h==1){
+            #   plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(l=10))} else if(h==6){
+            #     plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(r=10))} else {
+            #       plotlist[[h]] <- plot + theme(legend.position = "none") 
+            #     }
+            
+          }
+          
+        }
+        
+        legend <- get_legend(plot_2 + theme(legend.box.margin = margin(0, b = 10, 0, 0),
+                                            legend.key.size = unit(0.25, "cm"),
+                                            legend.key.width = unit(1.5,"cm"),
+                                            legend.text = element_text(family = "Georgia",size=8)))
+        
+        # A <- plot_grid(plotlist = list(plot_1 + theme(legend.position = "none"),
+        #                                plot_2 + theme(legend.position = "none"), 
+        #                                plot_3 + theme(legend.position = "none"), 
+        #                                plot_4 + theme(legend.position = "none"), 
+        #                                plot_5 + theme(legend.position = "none"), 
+        #                                plot_6 + theme(legend.position = "none")),
+        #                nrow = 3,labels = c("1.5°C","2°C","3°C","4°C","5°C","6°C"),label_fontfamily = "Georgia")
+        
+        # A <- plot_grid(plotlist = plotlist,ncol=2)
+        # 
+        # 
+        # B <- plot_grid(A,legend,nrow=2,rel_heights = c(1,0.1))
+        # ggsave(filename = here("output","figures",paste0("MapDetail_",m,"_",k,"_",j,"_",n,".jpg")),plot = B,height = 6,width = 6)
+        
+        plotlist_gets <- plotlist
+      }
+    }
+  }
+}
+
+
+
+```
+
+
+
+
+## LASSO row 
+
+```{r}
+overall_df %>% 
+  mutate(baseline=ifelse(baseline=="Mueller","MSW",baseline)) %>% 
+  mutate(model=case_when(model=="BHM"~"AATPsq",
+                         model=="BMS1"~"BMS-Uniform",
+                         model=="BMS2"~"BMS-Fixed",
+                         model=="BMS3"~"BMS-PIP",
+                         TRUE~model)) %>% 
+  
+  filter(baseline=="MSW",specification == "standard",model=="LASSO") %>% 
+  
+  
+  mutate(model = factor(model,levels = c("gets","LASSO"))) %>% 
+  mutate(variable = gsub("_level","",variable),
+         variable = ifelse(variable=="temp_2","temp",variable)) %>% 
+  ggplot(aes(x=final_temp,fill=model)) + 
+  
+  geom_hline(aes(yintercept = 0)) +
+  geom_ribbon(aes(ymin = midl,ymax = midh),alpha=0.2)+
+  geom_ribbon(aes(ymin = low,ymax = high),alpha=0.2)+
+  geom_ribbon(aes(ymin = vlow,ymax = vhigh),alpha=0.2)+
+  geom_line(aes(y=med)) + 
+  facet_grid(model~variable) +
+  
+  scale_fill_manual(values = "#FDE725FF")+
+  #scale_fill_viridis_d(option = "B") +
+  scale_y_continuous(labels = scales::percent)+
+  scale_x_continuous(labels = function(x){paste0(x,"°C")})+
+  #coord_cartesian(ylim = c(-1,1))+
+  
+  labs(x="Temperature Anomaly",y="GDP per capita impact to baseline",
+       title = NULL,subtitle = NULL)+
+  
+  theme_minimal() + 
+  theme(legend.position = "none",
+        panel.border = element_rect(colour = "black",size=0.5,fill=NA),
+        text = element_text(family = "Georgia",size = 10),
+        axis.text.x.bottom = element_text(size = 5))  -> C
+```
+
+## LASSO Maps
+
+```{r}
+set_null_device("png")
+for(m in unique(map_values$baseline)){
+  if(is.na(m)){next}
+  for(k in unique(map_values$scenario)){
+    if(is.na(k)){next}
+    if(m=="MSW"&k %in% c(1:5)){next}
+    if(m=="SSP"& k == "Hundred"){next}
+    for(j in unique(map_values$specification)){
+      if(is.na(j)){next}
+      
+      world_df %>% 
+        full_join(map_values %>% 
+                    filter(baseline==m,
+                           scenario==k,
+                           specification==j),by="region") %>% 
+        # if 90% not significant, then NA
+        mutate(pc.5 = ifelse(sig.90 != 1, NA, pc.5)) -> intermed
+      
+      
+      
+      for(n in "LASSO"){
+        if(is.na(n)){next}
+        #for(i in unique(map_values$map_position)){
+        
+        intermed %>% 
+          filter(model==n|is.na(model)) -> intermed_2
+        
+        for(i in 6){
+          if(is.na(i)){next}
+          
+          plotlist <- list()
+          for(h in 1:(intermed_2 %>% select(variable) %>% drop_na() %>% distinct(variable) %>% nrow)){
+            
+            
+            # h = "r1mm_level"
+            print(paste(m,k,j,i,n,intermed_2 %>% 
+                          select(variable) %>% 
+                          drop_na() %>% 
+                          distinct(variable) %>% 
+                          slice(h),sep=" "))
+            
+            
+            plot_title <- gsub("_level","",intermed_2 %>% 
+                                 select(variable) %>% 
+                                 drop_na() %>% 
+                                 distinct(variable) %>% 
+                                 slice(h) %>% pull(variable))
+            
+            intermed_2 %>% 
+              filter(variable == intermed_2 %>% 
+                       select(variable) %>% 
+                       drop_na() %>% 
+                       distinct(variable) %>% 
+                       slice(h) %>% pull(variable) | is.na(variable)) %>% 
+              
+              
+              filter(map_position==i|is.na(map_position)) %>% 
+              
+              ggplot() +
+              #geom_polygon(data = map_data("world") %>%  filter(region !="Antarctica"),
+              #             aes(x=long,y=lat,group=group),fill="white",color="black",inherit.aes = FALSE,size=0.1)+
+              geom_polygon(aes(x=long,y=lat,group=group,fill=pc.5)) +
+              coord_proj("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs") +
+              
+              #facet_wrap(~variable)+
+              #coord_quickmap()+
+              scale_fill_gradientn(colours = brewer.pal(name = "RdBu",n=11), 
+                                   breaks = seq(from = -1, to = 1, by = 0.2),
+                                   guide = guide_colourbar(title = paste0("Level Percentage Difference to Baseline (",
+                                                                          m," - ",k,")"),
+                                                           title.position = "top"),
+                                   labels=c(as.character(scales::percent(seq(from = -1, to = 0.8, by = 0.2))),">100%"),
+                                   limits=c(-1,1),
+                                   oob=scales::squish,
+                                   na.value = "grey") +
+              #labs(x=NULL,y=NULL, title = plot_title)+
+              labs(x=NULL,y=NULL)+
+              
+              theme(legend.position = "bottom",
+                    panel.background = element_blank(),
+                    text = element_text(family = "Georgia"),
+                    axis.ticks = element_blank(),
+                    axis.text = element_blank()) -> plot
+            
+            #assign(x = paste("plot",i,j,k,m,sep = "_"),value = plot)
+            assign(x = paste("plot",h,sep = "_"),value = plot)
+            
+            plotlist[[h]] <- plot + theme(legend.position = "none")    
+            # if(h==1){
+            #   plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(r=-10))} else if(h==4){
+            #     plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(l=-10))} else {
+            #       plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(r=-10,l=-10))
+            #     }
+            
+            # if(h==1){
+            #   plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(l=10))} else if(h==4){
+            #     plotlist[[h]] <- plot + theme(legend.position = "none",plot.margin = margin(r=10))} else {
+            #       plotlist[[h]] <- plot + theme(legend.position = "none")    
+            #     }
+            
+            # if(h==1){plotlist[[h]] <- plot + theme(legend.position = "none")}
+            # if(h==2){
+            #   plotlist[[2]] <- ggplot() + theme_void() 
+            #   plotlist[[3]] <- plot + theme(legend.position = "none")
+            # }
+            # if(h==3){plotlist[[4]] <- plot + theme(legend.position = "none")}
+            # if(h==4){plotlist[[5]] <- ggplot() + theme_void() 
+            #   plotlist[[6]] <- plot + theme(legend.position = "none")}
+            
+            
+            
+            
+          }
+          
+        }
+        
+        legend <- get_legend(plot_2 + theme(legend.box.margin = margin(0, b = 10, 0, 0),
+                                            legend.key.size = unit(0.25, "cm"),
+                                            legend.key.width = unit(1.5,"cm"),
+                                            legend.text = element_text(family = "Georgia",size=8)))
+        
+        # A <- plot_grid(plotlist = list(plot_1 + theme(legend.position = "none"),
+        #                                plot_2 + theme(legend.position = "none"), 
+        #                                plot_3 + theme(legend.position = "none"), 
+        #                                plot_4 + theme(legend.position = "none"), 
+        #                                plot_5 + theme(legend.position = "none"), 
+        #                                plot_6 + theme(legend.position = "none")),
+        #                nrow = 3,labels = c("1.5°C","2°C","3°C","4°C","5°C","6°C"),label_fontfamily = "Georgia")
+        
+        # A <- plot_grid(plotlist = plotlist,ncol=2)
+        # 
+        # 
+        # B <- plot_grid(A,legend,nrow=2,rel_heights = c(1,0.1))
+        # ggsave(filename = here("output","figures",paste0("MapDetail_",m,"_",k,"_",j,"_",n,".jpg")),plot = B,height = 6,width = 6)
+        
+        plotlist_LASSO <- plotlist
+      }
+    }
+  }
+}
+
+
+```
+## Combining
+
+```{r}
+B <- plot_grid(plotlist = plotlist_gets,nrow = 1)
+D <- plot_grid(plotlist = plotlist_LASSO,nrow = 1)
+
+AB <- plot_grid(A,B,nrow=2,align = "v",axis = "lr",rel_heights = c(1,0.3))
+CD <- plot_grid(C,D,nrow=2,align = "v",axis = "lr",rel_heights = c(1,0.3))
+
+ABCD <- plot_grid(AB,CD,nrow=2,rel_heights = c(1,0.7))
+#ABCD <- plot_grid(A,B,C,D,nrow=4,rel_heights = c(1,0.5,1,0.3),align = "v",axis = "lr")
+
+ggsave(ABCD,filename = here("output","figures","Detailed Combined.jpg"),width = 6,height = 6,dpi=600)
+
+postscript(here("output","figures","Detailed Combined.eps"),family = "Georgia")
+ABCD
+dev.off()
+ggsave(ABCD,filename = here("output","figures","Detailed Combined.pdf"),width = 6,height = 6,dpi=600,device = cairo_pdf)
+
+```
+
+
+```{r}
+
+```
+
+

@@ -6,6 +6,11 @@ Quantifying the economic impacts of climate change is crucial to inform mitigati
 
 ## Replication Instructions
 
-1. Download
-2. Open
-3. Run
+1. Download all large files [here](https://unioxfordnexus-my.sharepoint.com/:f:/g/personal/spet4251_ox_ac_uk/EhXWY3sXKopBiehjXzKM_d4BcE_VQ-UhHCjl2_zHhGluJw?e=PZvgQ9). 
+2. Move the files to: 
+
+- damage_curve_country_dataset_timetrends_updated02-19.csv to data/use
+- corrected_anomaly_climatedata.csv to data/temp
+
+3. Run all files in the code folder. 
+All code files in the folder `for reference only` are not available in replication, due to data size. Please contact [Moritz Schwarz](mailto:moritz.schwarz@ouce.ox.ac.uk), if you want to recreate all datasets from source.

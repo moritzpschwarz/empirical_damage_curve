@@ -1,0 +1,189 @@
+---
+title: "Model Presentation"
+author: "Moritz Schwarz and Felix Pretis"
+version: "2 June 2020"
+output:
+  html_document:
+    df_print: paged
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("output")) })
+---
+
+**October 2020:**
+This script creates the output tables. It needs the finished models as .RData files as input.
+For the summary stats table, it needs selection_matrix.csv as input.
+
+```{r "setup", message=FALSE}
+library(tidyverse)
+library(data.table)
+library(gets)
+library(here)
+
+
+# library(extrafont)
+# library(RColorBrewer)
+# library(Cairo)
+# library(viridis)
+
+rm(list = ls())
+select <- dplyr::select
+knitr::opts_chunk$set(message = F,echo = T,fig.width = 8, comment=NA)
+```
+
+# Display Models
+```{r, results="asis", echo=FALSE,out.width=10, eval=F}
+load(here("data","temp","standard_gets_model.RData"))
+load(here("data","temp","standard_LASSO_model.RData"))
+load(here("data","temp","BHM_model.RData"))
+
+load(here("data","temp","first_gets_model.RData"))
+load(here("data","temp","last_gets_model.RData"))
+
+load(here("data","temp","first_lasso_model.RData"))
+load(here("data","temp","last_lasso_model.RData"))
+
+#load(here("data","temp","interaction_model_all.RData"))
+#load(here("data","temp","interaction_model_selected.RData"))
+load(here("data","temp","log_interaction_model_all.RData"))
+load(here("data","temp","lasso_log_interaction_model_all.RData"))
+#load(here("data","temp","log_interaction_model_selected.RData"))
+
+
+load(here("data","temp","BHM_model.RData"))
+
+stargazer::stargazer(
+  standard_model,
+  lasso_standard_model,
+  BHM_model,
+  title = "Standard Model Results",
+  font.size = "small",
+  omit = "iis|time|year|iso",
+  out = here("output", "regression_table.html"),
+  type = "html",
+  column.labels = c("gets","LASSO","AATPsq"),
+  dep.var.labels = "\\Delta log GDP per capita",
+  add.lines = list(c("Time Fixed Effects","Yes","Yes","Yes"),
+                   c("Country Fixed Effects","Yes","Yes","Yes"),
+                   c("Country-Time Trends","Yes","Yes","Yes"),
+                   c("Squared Country-Time Trends","Yes","Yes","Yes"),
+                   c("Impulse Indicator Saturation","Yes","Yes","Yes"))
+)
+
+
+stargazer::stargazer(
+  first_model,
+  lasso_first_model,
+  last_model,
+  lasso_last_model,
+  interaction_model_all_log,
+  lasso_interaction_model_all_log,
+  
+  title = "Adaptation Model Results",
+  font.size = "small",
+  omit = "iis|time|year|iso",
+  out = here("output", "regression_table_Adaptation.html"),
+  type = "html",
+  column.labels = c("gets First","LASSO First","gets Last","LASSO Last","gets Income Adaptation","LASSO Income Adaptation"),
+  dep.var.labels = "\\Delta log GDP per capita",
+  add.lines = list(c("Time Fixed Effects","Yes","Yes","Yes","Yes","Yes","Yes"),
+                   c("Country Fixed Effects","Yes","Yes","Yes","Yes","Yes","Yes"),
+                   c("Country-Time Trends","Yes","Yes","Yes","Yes","Yes","Yes"),
+                   c("Squared Country-Time Trends","Yes","Yes","Yes","Yes","Yes","Yes"),
+                   c("Impulse Indicator Saturation","Yes","Yes","Yes","Yes","Yes","Yes"))
+)
+
+
+
+library(BMS)
+load(here("data","use","BMS","two-step","bm1.2.RData"))
+load(here("data","use","BMS","two-step","bm2.2.RData"))
+load(here("data","use","BMS","two-step","bm3.2.RData"))
+coef(bm1.2) %>% 
+  data.frame(Variable = row.names(.),.,row.names = NULL) %>% 
+  select(-Idx) %>% 
+  filter(!grepl("iis|time|year|iso",Variable),
+         !PIP==0) %>% 
+  bind_rows()
+  
+  -> A
+
+coef(bm2.2) %>% 
+  data.frame(Variable = row.names(.),.,row.names = NULL) %>% 
+  select(-Idx) %>% 
+  filter(!grepl("iis|time|year|iso",Variable),
+         !PIP==0) -> B
+
+coef(bm3.2) %>% 
+  data.frame(Variable = row.names(.),.,row.names = NULL) %>% 
+  select(-Idx) %>% 
+  filter(!grepl("iis|time|year|iso",Variable),
+         !PIP==0) -> C
+
+A %>% stargazer::stargazer(.,
+                       type="html",
+                       title = "Bayesian Model Selection - Uniform Prior",
+                       summary = FALSE,
+                       rownames = FALSE,
+                       covariate.labels = c("",c("PIP","Post Mean","Post SD","cond. Pos. Sign")),
+                       out = here("output", "BMS1.html"),
+                       align = TRUE)
+
+B %>% stargazer::stargazer(.,
+                       type="html",
+                       title = "Bayesian Model Selection - Fixed Prior",
+                       summary = FALSE,
+                       rownames = FALSE,
+                       covariate.labels = c("",c("PIP","Post Mean","Post SD","cond. Pos. Sign")),
+                       out = here("output", "BMS2.html"),
+                       align = TRUE)
+
+C %>% stargazer::stargazer(.,
+                       type="html",
+                       title = "Bayesian Model Selection - PIP Prior",
+                       summary = FALSE,
+                       rownames = FALSE,
+                       covariate.labels = c("",c("PIP","Post Mean","Post SD","cond. Pos. Sign")),
+                       out = here("output", "BMS3.html"),
+                       align = TRUE)
+
+
+
+
+full_join(A,B %>% rename_with(.cols = c(PIP,Post.Mean,Post.SD,Cond.Pos.Sign),.fn = ~paste0(.,"_BMS2")),by="Variable") %>% 
+  full_join(C %>% rename_with(.cols = c(PIP,Post.Mean,Post.SD,Cond.Pos.Sign),.fn = ~paste0(.,"_BMS3")),by="Variable") -> combined
+
+
+
+
+combined %>% 
+  stargazer::stargazer(.,
+                       dep.var.labels = c("BMS1","BMS2","BMS3"),
+                       type="text",
+                       #column.separate = c(1,2),
+                       title = "Bayesian Model Selection",
+                       summary = FALSE,
+                       rownames = FALSE,
+                       covariate.labels = c("",rep(c("PIP","Post Mean","Post SD","cond. Pos. Sign"),3)),
+                       #out = here("output", "BMS.html"),
+                       #column.labels = c("","Uniform Prior","Fixed Prior","PIP Prior"),
+                       column.labels = c("Uniform Prior","test"),
+                       align = TRUE,
+                       add.lines = c("BMS Prior",rep("Uniform",4),rep("Fixed",4),rep("PIP",4)))
+```
+
+# Summary stats
+
+```{r}
+df <- read_csv(here("data","temp","selection_matrix.csv"))
+
+
+stargazer::stargazer(df %>% select(-L1.diff.ln_gdp_cap,-gdp_cap) %>% rename(diff.log.gdppc =dep_var) %>% as.data.frame,
+                     summary = TRUE,
+                     font.size = "small",
+                     omit = "iis|time|year|iso|_2|",
+                     type="html",
+                     out=here("output","summary_stats.html"),
+                     title = "Summary Statistics")
+
+```
+
